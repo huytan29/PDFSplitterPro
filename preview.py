@@ -1,14 +1,17 @@
 import fitz
+from io import BytesIO
+
+from PIL import Image
 
 from PySide6.QtGui import QPixmap, QImage
 
 
-def render_page_preview(doc, page_number):
+def render_page_preview(doc, page_number, zoom=2):
 
     page = doc.load_page(page_number)
 
-    ZOOM = 2
-    
+    ZOOM = zoom
+
     mat = fitz.Matrix(ZOOM, ZOOM)
 
     pix = page.get_pixmap(matrix=mat)
@@ -31,3 +34,15 @@ def render_page_preview(doc, page_number):
 def render_range_preview(doc, start_page):
 
     return render_page_preview(doc, start_page - 1)
+
+
+def render_page_image(doc, page_number, zoom=2):
+    """Render mot trang PDF thanh PIL Image de chinh sua nhu anh quet."""
+    page = doc.load_page(page_number)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+
+    with Image.open(BytesIO(pix.tobytes("png"))) as image:
+        result = image.convert("RGBA")
+        result.load()
+
+    return result

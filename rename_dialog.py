@@ -1,8 +1,9 @@
 from PySide6.QtWidgets import *
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
-from preview import render_range_preview
+from preview import render_page_preview
+from image_pdf_dialog import pil_to_pixmap, render_editable_image
 
 from PySide6.QtWidgets import QGraphicsView
 from PySide6.QtWidgets import QGraphicsScene
@@ -16,13 +17,14 @@ class RenameDialog(QDialog):
                  doc,
                  start,
                  end,
-                 parent=None):
+                 parent=None,
+                 edited_pages=None):
 
         super().__init__(parent)
 
         self.zoom = 1.0
         self.rotation = 0
-        
+
         self.filename = ""
 
         self.setWindowTitle(
@@ -46,6 +48,7 @@ class RenameDialog(QDialog):
         self.end = end
         self.current_page = start
         self.rotation = 0
+        self.edited_pages = edited_pages if edited_pages is not None else {}
 
         #self.preview = QLabel()
 
@@ -64,19 +67,23 @@ class RenameDialog(QDialog):
 
         #layout.addWidget(self.preview)
 
-        pix = render_range_preview(doc, start)
+        self.previewContainer = QWidget()
 
-        self.preview = QLabel()
+        self.previewLayout = QVBoxLayout(self.previewContainer)
 
-        self.preview.setPixmap(pix)
+        self.previewLayout.setContentsMargins(12, 12, 12, 12)
 
-        self.preview.setAlignment(Qt.AlignCenter)
+        self.previewLayout.setSpacing(18)
 
         self.scroll = QScrollArea()
 
-        self.scroll.setWidget(self.preview)
+        self.scroll.setWidget(self.previewContainer)
 
         self.scroll.setWidgetResizable(True)
+
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         layout.addWidget(self.scroll)
 
@@ -134,6 +141,9 @@ class RenameDialog(QDialog):
 
         self.update_preview()
 
+        # Sau khi hop thoai hien ra, cap nhat lai theo chieu rong thuc te.
+        QTimer.singleShot(0, self.update_preview)
+
     def ok_clicked(self):
 
         text = self.edit.text().strip()
@@ -154,40 +164,74 @@ class RenameDialog(QDialog):
     def update_preview(self):
 
         # Lấy đúng trang hiện tại
-        pix = render_range_preview(
-            self.doc,
-            self.current_page
-        )
+        while self.previewLayout.count():
 
-        # Xoay preview
-        if self.rotation != 0:
+            item = self.previewLayout.takeAt(0)
 
-            transform = QTransform()
+            if item.widget() is not None:
 
-            transform.rotate(self.rotation)
+                item.widget().deleteLater()
 
-            pix = pix.transformed(
-                transform,
-                Qt.SmoothTransformation
-            )
+        preview_width = max(420, self.scroll.viewport().width() - 48)
 
-        # Zoom
-        if self.zoom != 1:
+        for page_number in range(self.start, self.end + 1):
 
-            w = int(pix.width() * self.zoom)
+            page_index = page_number - 1
 
-            h = int(pix.height() * self.zoom)
+            if page_index in self.edited_pages:
 
-            pix = pix.scaled(
-                w,
-                h,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
+                pix = pil_to_pixmap(
+                    render_editable_image(self.edited_pages[page_index])
+                )
 
-        self.preview.setPixmap(pix)
+            else:
 
-        self.preview.adjustSize()
+                # Zoom 1 de hien thi nhieu trang ma khong ton qua nhieu bo nho.
+                pix = render_page_preview(self.doc, page_index, zoom=1)
+
+            if self.rotation != 0:
+
+                transform = QTransform()
+
+                transform.rotate(self.rotation)
+
+                pix = pix.transformed(
+                    transform,
+                    Qt.SmoothTransformation
+                )
+
+            if self.zoom != 1:
+
+                pix = pix.scaled(
+                    int(pix.width() * self.zoom),
+                    int(pix.height() * self.zoom),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+
+            if pix.width() > preview_width:
+
+                pix = pix.scaledToWidth(preview_width, Qt.SmoothTransformation)
+
+            page_label = QLabel(f"Trang {page_number}")
+
+            page_label.setAlignment(Qt.AlignCenter)
+
+            page_label.setStyleSheet("font-weight: 600; padding-top: 4px;")
+
+            image_label = QLabel()
+
+            image_label.setAlignment(Qt.AlignCenter)
+
+            image_label.setPixmap(pix)
+
+            image_label.setStyleSheet("background: white;")
+
+            self.previewLayout.addWidget(page_label)
+
+            self.previewLayout.addWidget(image_label)
+
+        self.previewLayout.addStretch()
 
     def zoom_in(self):
 

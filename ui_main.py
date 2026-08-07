@@ -1,3 +1,4 @@
+import copy
 import fitz
 
 from PySide6.QtWidgets import *
@@ -6,9 +7,15 @@ from PySide6.QtGui import *
 
 from PySide6.QtCore import *
 
-from preview import render_page_preview
-from splitter import split_pdf
+from preview import render_page_image, render_page_preview
+from splitter import split_pdf, split_pdf_with_edits
 from rename_dialog import RenameDialog
+from image_pdf_dialog import (
+    EditableImage,
+    ImageToPdfDialog,
+    pil_to_pixmap,
+    render_editable_image,
+)
 
 
 class MainWindow(QMainWindow):
@@ -23,6 +30,7 @@ class MainWindow(QMainWindow):
         self.save_folder=""
         self.doc=None
         self.current_page = 0
+        self.edited_pages = {}
 
         self.initUI()
 
@@ -33,6 +41,20 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(widget)
 
         layout=QVBoxLayout(widget)
+
+        image_tools = QHBoxLayout()
+
+        btnImageToPdf = QPushButton("ẢNH → PDF")
+
+        btnImageToPdf.setMinimumHeight(38)
+
+        btnImageToPdf.clicked.connect(self.open_image_to_pdf)
+
+        image_tools.addStretch()
+
+        image_tools.addWidget(btnImageToPdf)
+
+        layout.addLayout(image_tools)
 
         #=========================
         # FILE PDF
@@ -102,14 +124,51 @@ class MainWindow(QMainWindow):
 
         self.lblCurrent = QLabel("Trang 1")
 
+        self.pageSlider = QSlider(Qt.Horizontal)
+
+        self.pageSlider.setRange(1, 1)
+
+        self.pageSlider.setEnabled(False)
+
+        self.pageSpin = QSpinBox()
+
+        self.pageSpin.setRange(1, 1)
+
+        self.pageSpin.setEnabled(False)
+
         nav.addWidget(self.btnPrev)
         nav.addWidget(self.lblCurrent)
+        nav.addWidget(QLabel("Lướt trang:"))
+        nav.addWidget(self.pageSlider, 1)
+        nav.addWidget(self.pageSpin)
         nav.addWidget(self.btnNext)
 
         layout.addLayout(nav)
 
         self.btnPrev.clicked.connect(self.prev_page)
         self.btnNext.clicked.connect(self.next_page)
+        self.pageSlider.valueChanged.connect(self.select_page_from_control)
+        self.pageSpin.valueChanged.connect(self.select_page_from_control)
+
+        page_actions = QHBoxLayout()
+
+        self.btnEditPage = QPushButton("CHỈNH SỬA TRANG HIỆN TẠI")
+
+        self.btnEditPage.setEnabled(False)
+
+        self.btnEditPage.clicked.connect(self.edit_current_page)
+
+
+        self.editStatus = QLabel(
+            "Thay doi se duoc ap dung khi bam TACH PDF; PDF goc khong bi ghi de."
+        )
+
+        self.editStatus.setStyleSheet("color: #336699;")
+
+        page_actions.addWidget(self.btnEditPage)
+        page_actions.addWidget(self.editStatus, 1)
+
+        layout.addLayout(page_actions)
 
 
         #=========================
@@ -166,6 +225,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(btnSplit)
 
 
+    def open_image_to_pdf(self):
+
+        dialog = ImageToPdfDialog(self)
+
+        dialog.exec()
+
+
     def open_pdf(self):
 
         file,_=QFileDialog.getOpenFileName(
@@ -178,11 +244,27 @@ class MainWindow(QMainWindow):
         if not file:
             return
 
+        if self.doc is not None:
+
+            self.doc.close()
+
         self.pdf_path=file
 
         self.txtPdf.setText(file)
 
-        self.doc=fitz.open(file)
+        try:
+
+            self.doc=fitz.open(file)
+
+        except Exception as error:
+
+            self.doc = None
+
+            QMessageBox.critical(self, "Lỗi", f"Không thể mở PDF.\n{error}")
+
+            return
+
+        self.edited_pages = {}
 
         self.lblPages.setText(f"Số trang: {self.doc.page_count}")
 
@@ -199,6 +281,29 @@ class MainWindow(QMainWindow):
 
 
         self.current_page = 0
+
+        self.pageSlider.blockSignals(True)
+
+        self.pageSpin.blockSignals(True)
+
+        self.pageSlider.setRange(1, self.doc.page_count)
+
+        self.pageSpin.setRange(1, self.doc.page_count)
+
+        self.pageSlider.setValue(1)
+
+        self.pageSpin.setValue(1)
+
+        self.pageSlider.setEnabled(self.doc.page_count > 1)
+
+        self.pageSpin.setEnabled(True)
+
+        self.pageSlider.blockSignals(False)
+
+        self.pageSpin.blockSignals(False)
+
+        self.btnEditPage.setEnabled(True)
+
 
         self.lblCurrent.setText(
             f"Trang 1/{self.doc.page_count}"
@@ -261,7 +366,13 @@ class MainWindow(QMainWindow):
 
         for start,end in ranges:
 
-            dlg=RenameDialog(self.doc,start,end,self)
+            dlg=RenameDialog(
+                self.doc,
+                start,
+                end,
+                self,
+                edited_pages=self.edited_pages
+            )
 
             if dlg.exec():
 
@@ -275,13 +386,26 @@ class MainWindow(QMainWindow):
             return
 
 
-        split_pdf(
-            self.pdf_path,
-            self.save_folder,
-            ranges,
-            filenames,
-            rotations
-        )
+        if self.edited_pages:
+
+            split_pdf_with_edits(
+                self.doc,
+                self.save_folder,
+                ranges,
+                filenames,
+                rotations,
+                self.edited_pages
+            )
+
+        else:
+
+            split_pdf(
+                self.pdf_path,
+                self.save_folder,
+                ranges,
+                filenames,
+                rotations
+            )
 
         QMessageBox.information(
             self,
@@ -293,12 +417,20 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        pix = render_page_preview(
-            self.doc,
-            self.current_page
-        )
+        if self.current_page in self.edited_pages:
 
-        width = self.scroll.viewport().width() - 20
+            pix = pil_to_pixmap(
+                render_editable_image(self.edited_pages[self.current_page])
+            )
+
+        else:
+
+            pix = render_page_preview(
+                self.doc,
+                self.current_page
+            )
+
+        width = max(1, self.scroll.viewport().width() - 20)
 
         pix = pix.scaledToWidth(
             width,
@@ -309,6 +441,52 @@ class MainWindow(QMainWindow):
 
         self.preview.adjustSize()
 
+        self.update_page_status()
+
+
+    def update_page_status(self):
+
+        if self.doc is None:
+            return
+
+        edited = " • đã chỉnh sửa" if self.current_page in self.edited_pages else ""
+
+        self.lblCurrent.setText(
+            f"Trang {self.current_page+1}/{self.doc.page_count}{edited}"
+        )
+
+
+    def select_page_from_control(self, page_number):
+
+        if self.doc is None:
+            return
+
+        self.set_current_page(page_number - 1)
+
+
+    def set_current_page(self, page_index):
+
+        if self.doc is None:
+            return
+
+        page_index = max(0, min(page_index, self.doc.page_count - 1))
+
+        self.current_page = page_index
+
+        self.pageSlider.blockSignals(True)
+
+        self.pageSpin.blockSignals(True)
+
+        self.pageSlider.setValue(page_index + 1)
+
+        self.pageSpin.setValue(page_index + 1)
+
+        self.pageSlider.blockSignals(False)
+
+        self.pageSpin.blockSignals(False)
+
+        self.update_preview()
+
     def next_page(self):
 
         if self.doc is None:
@@ -316,13 +494,7 @@ class MainWindow(QMainWindow):
 
         if self.current_page < self.doc.page_count - 1:
 
-            self.current_page += 1
-
-            self.lblCurrent.setText(
-                f"Trang {self.current_page+1}/{self.doc.page_count}"
-            )
-
-            self.update_preview()
+            self.set_current_page(self.current_page + 1)
 
 
     def prev_page(self):
@@ -332,13 +504,73 @@ class MainWindow(QMainWindow):
 
         if self.current_page > 0:
 
-            self.current_page -= 1
+            self.set_current_page(self.current_page - 1)
 
-            self.lblCurrent.setText(
-                f"Trang {self.current_page+1}/{self.doc.page_count}"
-            )
+
+    def current_page_model(self):
+
+        existing = self.edited_pages.get(self.current_page)
+
+        if existing is not None:
+
+            return existing
+
+        image = render_page_image(self.doc, self.current_page)
+
+        return EditableImage(
+            f"Trang {self.current_page+1}",
+            image.copy(),
+            image.copy()
+        )
+
+
+    def edit_current_page(self):
+
+        if self.doc is None:
+            return
+
+        source = self.current_page_model()
+
+        # Mo ban sao lam viec: dong hop thoai Huy se khong anh huong trang goc.
+        working = EditableImage(
+            source.path,
+            source.image.copy(),
+            source.original.copy(),
+            copy.deepcopy(source.annotations)
+        )
+
+        dialog = ImageToPdfDialog(
+            self,
+            [working],
+            page_edit_mode=True
+        )
+
+        if dialog.exec():
+
+            updated = dialog.images[0]
+
+            if self.page_model_is_original(updated):
+
+                self.edited_pages.pop(self.current_page, None)
+
+            else:
+
+                self.edited_pages[self.current_page] = updated
+
 
             self.update_preview()
+
+
+    def page_model_is_original(self, model):
+
+        return (
+            not model.annotations
+            and model.image.mode == model.original.mode
+            and model.image.size == model.original.size
+            and model.image.tobytes() == model.original.tobytes()
+        )
+
+
     def resizeEvent(self, event):
 
         super().resizeEvent(event)
@@ -346,4 +578,3 @@ class MainWindow(QMainWindow):
         if self.doc:
 
             self.update_preview()
-    
