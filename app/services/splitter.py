@@ -6,7 +6,7 @@ import fitz
 from pypdf import PdfReader
 from pypdf import PdfWriter
 
-from image_pdf_dialog import render_editable_image
+from app.models.editable_image import render_editable_image
 
 
 def create_filename(folder, name):

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import copy
 import os
-from dataclasses import dataclass, field
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QColorDialog,
@@ -34,78 +33,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.models.editable_image import (
+    EditableImage,
+    TextAnnotation,
+    pil_to_pixmap,
+    render_annotations,
+    render_editable_image,
+)
+
 
 IMAGE_FILTER = (
     "Anh (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;"
     "Tat ca tep (*.*)"
 )
-
-
-@dataclass
-class TextAnnotation:
-    text: str
-    x: float
-    y: float
-    size: int
-    color: tuple[int, int, int]
-
-
-@dataclass
-class EditableImage:
-    path: str
-    image: Image.Image
-    original: Image.Image
-    annotations: list[TextAnnotation] = field(default_factory=list)
-    history: list[tuple[Image.Image, list[TextAnnotation]]] = field(default_factory=list)
-
-
-def pil_to_pixmap(image: Image.Image) -> QPixmap:
-    """Chuyen PIL Image sang QPixmap, tao ban sao de tranh mat bo nho."""
-    rgba = image.convert("RGBA")
-    data = rgba.tobytes("raw", "RGBA")
-    qimage = QImage(
-        data,
-        rgba.width,
-        rgba.height,
-        rgba.width * 4,
-        QImage.Format.Format_RGBA8888,
-    ).copy()
-    return QPixmap.fromImage(qimage)
-
-
-def get_font(size: int) -> ImageFont.ImageFont:
-    """Dung font he thong neu co; fallback van cho phep luu PDF."""
-    fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts")
-    for name in ("arial.ttf", "calibri.ttf", "segoeui.ttf"):
-        font_path = os.path.join(fonts_dir, name)
-        if os.path.exists(font_path):
-            return ImageFont.truetype(font_path, size)
-    return ImageFont.load_default()
-
-
-def render_annotations(image: Image.Image, annotations: list[TextAnnotation]) -> Image.Image:
-    """Ve cac chu da chen len mot ban sao RGBA cua anh."""
-    canvas = image.convert("RGBA")
-    draw = ImageDraw.Draw(canvas)
-    for annotation in annotations:
-        size = max(10, round(min(canvas.size) * annotation.size / 1000))
-        draw.text(
-            (round(annotation.x * canvas.width), round(annotation.y * canvas.height)),
-            annotation.text,
-            font=get_font(size),
-            fill=annotation.color + (255,),
-            stroke_width=max(0, size // 28),
-            stroke_fill=(255, 255, 255, 180),
-        )
-    return canvas
-
-
-def render_editable_image(model: EditableImage) -> Image.Image:
-    """Tra ve anh RGB hoan chinh de xem truoc hoac chen vao PDF."""
-    image = render_annotations(model.image, model.annotations)
-    background = Image.new("RGB", image.size, "white")
-    background.paste(image, mask=image.getchannel("A"))
-    return background
 
 
 class CropGraphicsView(QGraphicsView):

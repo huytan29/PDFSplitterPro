@@ -2,8 +2,8 @@ from PySide6.QtWidgets import *
 
 from PySide6.QtCore import Qt, QTimer
 
-from preview import render_page_preview
-from image_pdf_dialog import pil_to_pixmap, render_editable_image
+from app.models.editable_image import pil_to_pixmap, render_editable_image
+from app.services.preview import render_page_preview
 
 from PySide6.QtWidgets import QGraphicsView
 from PySide6.QtWidgets import QGraphicsScene

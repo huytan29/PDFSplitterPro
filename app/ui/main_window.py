@@ -7,15 +7,15 @@ from PySide6.QtGui import *
 
 from PySide6.QtCore import *
 
-from preview import render_page_image, render_page_preview
-from splitter import split_pdf, split_pdf_with_edits
-from rename_dialog import RenameDialog
-from image_pdf_dialog import (
+from app.models.editable_image import (
     EditableImage,
-    ImageToPdfDialog,
     pil_to_pixmap,
     render_editable_image,
 )
+from app.services.preview import render_page_image, render_page_preview
+from app.services.splitter import split_pdf, split_pdf_with_edits
+from app.ui.image_pdf_dialog import ImageToPdfDialog
+from app.ui.rename_dialog import RenameDialog
 
 
 class MainWindow(QMainWindow):
