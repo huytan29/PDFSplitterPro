@@ -1,12 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
 datas = []
 binaries = []
 hiddenimports = []
 datas += [('resources/pdf_lightning_logo.png', 'resources')]
-tmp_ret = collect_all('PySide6')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
@@ -20,7 +16,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=['PyQt5', 'PyQt6', 'PySide2', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets'],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 
@@ -38,6 +34,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    icon='resources/pdf_lightning_logo_windows.ico',
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
