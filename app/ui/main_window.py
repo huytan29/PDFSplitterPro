@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.doc=None
         self.current_page = 0
         self.edited_pages = {}
+        self.checked_pages = set()
 
         self.initUI()
 
@@ -133,6 +134,9 @@ class MainWindow(QMainWindow):
         pageRailHint = QLabel(
             "T\u00edch \u00f4 \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang; b\u1ea5m th\u1ebb \u0111\u1ec3 ch\u1ecdn trang ri\u00eang."
         )
+        pageRailHint.setText(
+            "B\u1ea5m th\u1ebb trang \u0111\u1ec3 ch\u1ecdn ho\u1eb7c b\u1ecf ch\u1ecdn; d\u1ea5u \u2713 xanh hi\u1ec3n th\u1ecb ngay tr\u00ean \u1ea3nh."
+        )
         pageRailHint.setWordWrap(True)
         pageRailHint.setStyleSheet("color: #9ab6ca;")
         pageRailLayout.addWidget(pageRailHint)
@@ -170,7 +174,7 @@ class MainWindow(QMainWindow):
             }
         """)
         self.pageList.itemSelectionChanged.connect(self.select_page_from_list)
-        self.pageList.itemChanged.connect(self.update_page_selection_status)
+        self.pageList.itemClicked.connect(self.toggle_page_checked)
         pageRailLayout.addWidget(self.pageList, 1)
 
         pageRailButtons = QHBoxLayout()
@@ -547,6 +551,7 @@ class MainWindow(QMainWindow):
 
         self.pageList.blockSignals(True)
         self.pageList.clear()
+        self.checked_pages.clear()
 
         for page_index in range(self.doc.page_count):
             item = QListWidgetItem(
@@ -554,8 +559,6 @@ class MainWindow(QMainWindow):
                 self.page_list_label(page_index),
             )
             item.setData(Qt.ItemDataRole.UserRole, page_index)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
             self.pageList.addItem(item)
 
         self.pageList.setCurrentRow(self.current_page)
@@ -563,7 +566,7 @@ class MainWindow(QMainWindow):
         self.update_page_selection_status()
 
 
-    def page_thumbnail(self, page_index):
+    def page_thumbnail(self, page_index, selected=False):
 
         if page_index in self.edited_pages:
             pix = pil_to_pixmap(
@@ -572,11 +575,40 @@ class MainWindow(QMainWindow):
         else:
             pix = render_page_preview(self.doc, page_index, zoom=0.30)
 
-        return pix.scaled(
+        thumbnail = pix.scaled(
             self.pageList.iconSize(),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
+        return self.add_selected_badge(thumbnail) if selected else thumbnail
+
+
+    def add_selected_badge(self, pixmap):
+
+        """Draw a prominent green selection badge on a page thumbnail."""
+        result = QPixmap(pixmap)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        badge_size = max(24, min(36, min(result.width(), result.height()) // 4))
+        badge_rect = QRect(
+            result.width() - badge_size - 5,
+            5,
+            badge_size,
+            badge_size,
+        )
+        painter.setPen(QPen(QColor("#93ffd0"), 2))
+        painter.setBrush(QColor("#20c77a"))
+        painter.drawEllipse(badge_rect)
+
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(round(badge_size * 0.72))
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(badge_rect, Qt.AlignCenter, "✓")
+        painter.end()
+        return result
 
 
     def page_list_label(self, page_index):
@@ -594,25 +626,39 @@ class MainWindow(QMainWindow):
             return
 
         item.setText(self.page_list_label(page_index))
-        item.setIcon(QIcon(self.page_thumbnail(page_index)))
+        selected = page_index in self.checked_pages
+        item.setIcon(QIcon(self.page_thumbnail(page_index, selected)))
 
 
     def checked_page_indices(self):
 
-        return [
-            page_index
-            for page_index in range(self.pageList.count())
-            if self.pageList.item(page_index).checkState() == Qt.CheckState.Checked
-        ]
+        return sorted(self.checked_pages)
 
 
     def set_all_pages_checked(self, checked):
 
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        self.pageList.blockSignals(True)
+        if checked:
+            self.checked_pages = set(range(self.pageList.count()))
+        else:
+            self.checked_pages.clear()
+
         for page_index in range(self.pageList.count()):
-            self.pageList.item(page_index).setCheckState(state)
-        self.pageList.blockSignals(False)
+            self.refresh_page_list_item(page_index)
+        self.update_page_selection_status()
+
+
+    def toggle_page_checked(self, item):
+
+        page_index = item.data(Qt.ItemDataRole.UserRole)
+        if page_index is None:
+            return
+
+        if page_index in self.checked_pages:
+            self.checked_pages.remove(page_index)
+        else:
+            self.checked_pages.add(page_index)
+
+        self.refresh_page_list_item(page_index)
         self.update_page_selection_status()
 
 
@@ -641,7 +687,7 @@ class MainWindow(QMainWindow):
             self.pageSummary.setText(summary)
             self.btnEditPage.setText("CH\u1ec8NH S\u1eecA TRANG \u0110ANG CH\u1eccN")
             self.editStatus.setText(
-                "T\u00edch \u00f4 trong danh s\u00e1ch trang \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang c\u00f9ng l\u00fac."
+                "B\u1ea5m th\u1ebb trang \u0111\u1ec3 ch\u1ecdn nhi\u1ec1u trang c\u00f9ng l\u00fac."
             )
 
 
