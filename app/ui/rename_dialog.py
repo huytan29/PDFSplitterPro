@@ -22,6 +22,56 @@ class RenameDialog(QDialog):
 
         super().__init__(parent)
 
+        self.setModal(True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QDialog { background: #181818; color: #f4f4f4; }
+            QScrollArea {
+                background: #171717;
+                border: 1px solid #414141;
+                border-radius: 8px;
+            }
+            QWidget#splitPreview { background: #202020; }
+            QLabel#splitSourceNote {
+                background: #243848;
+                border: 1px solid #3f6b87;
+                border-radius: 6px;
+                color: #bde5ff;
+                padding: 6px 10px;
+            }
+            QLabel#splitPageLabel {
+                background: #292929;
+                border: 1px solid #414141;
+                border-radius: 5px;
+                color: #ffffff;
+                padding: 6px;
+            }
+            QLabel#splitPageImage {
+                background: #ffffff;
+                border: 1px solid #636363;
+                border-radius: 4px;
+            }
+            QLineEdit {
+                background: #292929;
+                border: 1px solid #555555;
+                border-radius: 5px;
+                color: #ffffff;
+                padding: 7px;
+            }
+            QPushButton {
+                background: #303030;
+                border: 1px solid #4d4d4d;
+                border-radius: 5px;
+                color: #ffffff;
+                min-height: 30px;
+            }
+            QPushButton:hover {
+                background: #3b3b3b;
+                border-color: #5caee8;
+            }
+        """)
+
         self.zoom = 1.0
         self.rotation = 0
 
@@ -31,17 +81,27 @@ class RenameDialog(QDialog):
             f"Tách trang {start}-{end}"
         )
 
-        self.resize(1000,700)
+        self.resize(1280, 820)
+        self.setMinimumSize(980, 650)
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
 
         label = QLabel(
             f"Trang {start} → {end}"
         )
 
         label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("font-size: 16px; font-weight: 700;")
 
         layout.addWidget(label)
+
+        self.sourceNote = QLabel()
+        self.sourceNote.setObjectName("splitSourceNote")
+        self.sourceNote.setWordWrap(True)
+        layout.addWidget(self.sourceNote)
 
         self.doc = doc
         self.start = start
@@ -68,6 +128,8 @@ class RenameDialog(QDialog):
         #layout.addWidget(self.preview)
 
         self.previewContainer = QWidget()
+        self.previewContainer.setObjectName("splitPreview")
+        self.previewContainer.setAutoFillBackground(True)
 
         self.previewLayout = QVBoxLayout(self.previewContainer)
 
@@ -84,6 +146,7 @@ class RenameDialog(QDialog):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll.viewport().setStyleSheet("background: #171717;")
 
         layout.addWidget(self.scroll)
 
@@ -163,6 +226,20 @@ class RenameDialog(QDialog):
 
     def update_preview(self):
 
+        edited_count = sum(
+            page_number - 1 in self.edited_pages
+            for page_number in range(self.start, self.end + 1)
+        )
+        if edited_count:
+            self.sourceNote.setText(
+                f"Nguồn xem trước: {edited_count}/{self.end - self.start + 1} trang "
+                "đã được chỉnh sửa trong bộ nhớ."
+            )
+        else:
+            self.sourceNote.setText(
+                "Nguồn xem trước: PDF gốc (chưa có trang chỉnh sửa tự động)."
+            )
+
         # Lấy đúng trang hiện tại
         while self.previewLayout.count():
 
@@ -216,16 +293,15 @@ class RenameDialog(QDialog):
             page_label = QLabel(f"Trang {page_number}")
 
             page_label.setAlignment(Qt.AlignCenter)
-
-            page_label.setStyleSheet("font-weight: 600; padding-top: 4px;")
+            page_label.setObjectName("splitPageLabel")
+            page_label.setStyleSheet("font-weight: 600;")
 
             image_label = QLabel()
 
             image_label.setAlignment(Qt.AlignCenter)
 
             image_label.setPixmap(pix)
-
-            image_label.setStyleSheet("background: white;")
+            image_label.setObjectName("splitPageImage")
 
             self.previewLayout.addWidget(page_label)
 

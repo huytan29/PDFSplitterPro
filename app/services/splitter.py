@@ -175,7 +175,10 @@ def append_edited_page(output_doc, source_doc, page_index, model):
     )
 
     buffer = BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
+    # ``optimize=True`` is disproportionately slow on high-resolution scans.
+    # PyMuPDF applies deflate compression when saving the finished PDF, so a
+    # modest PNG compression level preserves quality while exporting faster.
+    image.save(buffer, format="PNG", compress_level=3)
     page.insert_image(page.rect, stream=buffer.getvalue())
     return page
 

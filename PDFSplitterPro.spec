@@ -1,8 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 datas = []
 binaries = []
-hiddenimports = []
+hiddenimports = ['pytesseract']
 datas += [('resources/pdf_lightning_logo.png', 'resources')]
+
+ocr_folder = os.path.join('resources', 'tesseract')
+if os.path.isfile(os.path.join(ocr_folder, 'tesseract.exe')):
+    datas += [(ocr_folder, 'resources/tesseract')]
 
 
 a = Analysis(

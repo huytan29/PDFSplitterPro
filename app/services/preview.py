@@ -1,6 +1,4 @@
 import fitz
-from io import BytesIO
-
 from PIL import Image
 
 from PySide6.QtGui import QPixmap, QImage
@@ -41,8 +39,10 @@ def render_page_image(doc, page_number, zoom=2):
     page = doc.load_page(page_number)
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
 
-    with Image.open(BytesIO(pix.tobytes("png"))) as image:
-        result = image.convert("RGBA")
-        result.load()
-
-    return result
+    # Avoid an expensive PNG encode -> decode round trip. PyMuPDF already
+    # exposes RGB pixels in memory, and Pillow can copy them directly.
+    return Image.frombytes(
+        "RGB",
+        (pix.width, pix.height),
+        pix.samples,
+    ).convert("RGBA")

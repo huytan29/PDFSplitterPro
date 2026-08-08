@@ -13,6 +13,11 @@ from app.models.editable_image import (
     pil_to_pixmap,
     render_editable_image,
 )
+from app.services.auto_correct import (
+    OcrUnavailableError,
+    auto_correct_document,
+    ensure_ocr_available,
+)
 from app.services.preview import render_page_image, render_page_preview
 from app.services.splitter import (
     merge_pdf_with_edits,
@@ -40,6 +45,7 @@ class MainWindow(QMainWindow):
         self.current_page = 0
         self.edited_pages = {}
         self.checked_pages = set()
+        self._thumbnail_cache = {}
 
         self.initUI()
 
@@ -49,7 +55,34 @@ class MainWindow(QMainWindow):
         widget=QWidget()
         self.setCentralWidget(widget)
 
-        layout=QVBoxLayout(widget)
+        outerLayout = QVBoxLayout(widget)
+        outerLayout.setContentsMargins(0, 0, 0, 0)
+
+        self.mainScroll = QScrollArea()
+        self.mainScroll.setWidgetResizable(True)
+        self.mainScroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.mainScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.mainScroll.setStyleSheet("""
+            QScrollArea, QScrollArea > QWidget > QWidget {
+                background: #1b1b1b;
+            }
+        """)
+
+        self.mainContent = QWidget()
+        self.mainContent.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        self.mainScroll.setWidget(self.mainContent)
+        # The form may scroll on compact displays.  The primary split actions
+        # are placed in a fixed footer below, so they never disappear below the
+        # fold.
+        outerLayout.addWidget(self.mainScroll, 1)
+
+        layout=QVBoxLayout(self.mainContent)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
 
         image_tools = QHBoxLayout()
 
@@ -102,14 +135,18 @@ class MainWindow(QMainWindow):
         editorLayout.setSpacing(8)
 
         self.pageRail = QWidget()
-        self.pageRail.setMinimumHeight(460)
+        self.pageRail.setObjectName("pageRail")
+        self.pageRail.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self.pageRail.setStyleSheet("""
-            QWidget {
+            QWidget#pageRail {
                 background: #1d1d1d;
                 border: 1px solid #454545;
                 border-radius: 8px;
             }
-            QLabel {
+            QWidget#pageRail QLabel {
                 border: none;
             }
         """)
@@ -142,18 +179,25 @@ class MainWindow(QMainWindow):
         pageRailLayout.addWidget(pageRailHint)
 
         self.pageList = QListWidget()
-        self.pageList.setIconSize(QSize(145, 180))
-        self.pageList.setGridSize(QSize(185, 235))
+        self.pageList.setIconSize(QSize(120, 140))
+        # A single compact row: enough for image + caption without the large
+        # empty band that a fixed, oversized thumbnail area created.
+        self.pageList.setGridSize(QSize(160, 180))
         self.pageList.setViewMode(QListView.ViewMode.IconMode)
         self.pageList.setFlow(QListView.Flow.LeftToRight)
-        self.pageList.setWrapping(True)
+        self.pageList.setWrapping(False)
         self.pageList.setResizeMode(QListView.ResizeMode.Adjust)
         self.pageList.setMovement(QListView.Movement.Static)
         self.pageList.setWordWrap(True)
+        self.pageList.setUniformItemSizes(True)
         self.pageList.setSpacing(8)
-        self.pageList.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pageList.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pageList.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.pageList.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.pageList.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # One complete tile remains visible at high-DPI scaling.  Extra pages
+        # use the horizontal rail rather than expanding the form vertically.
+        self.pageList.setFixedHeight(206)
         self.pageList.setStyleSheet("""
             QListWidget {
                 background: #202020;
@@ -188,31 +232,76 @@ class MainWindow(QMainWindow):
         pageRailButtons.addWidget(self.btnClearPageSelection)
         pageRailLayout.addLayout(pageRailButtons)
 
-        editorLayout.addWidget(self.pageRail, 1)
+        editorLayout.addWidget(self.pageRail)
 
-        page_actions = QHBoxLayout()
+        self.pageActionsPanel = QFrame()
+        self.pageActionsPanel.setObjectName("pageActionsPanel")
+        self.pageActionsPanel.setStyleSheet("""
+            QFrame#pageActionsPanel {
+                background: #252525;
+                border: 1px solid #4b4b4b;
+                border-radius: 8px;
+            }
+        """)
+        page_actions = QHBoxLayout(self.pageActionsPanel)
+        page_actions.setContentsMargins(10, 8, 10, 8)
+        page_actions.setSpacing(10)
 
-        self.btnEditPage = QPushButton("CHỈNH SỬA TRANG HIỆN TẠI")
+        self.btnEditPage = QPushButton("CHỈNH SỬA")
 
         self.btnEditPage.setEnabled(False)
 
         self.btnEditPage.setMinimumHeight(36)
+        self.btnEditPage.setMinimumWidth(126)
+        self.btnEditPage.setMaximumWidth(142)
 
         self.btnEditPage.clicked.connect(self.edit_current_page)
+
+        self.btnAutoFix = QPushButton("✦ TỰ SỬA")
+        self.btnAutoFix.setEnabled(False)
+        self.btnAutoFix.setMinimumHeight(36)
+        self.btnAutoFix.setMinimumWidth(118)
+        self.btnAutoFix.setMaximumWidth(128)
+        self.btnAutoFix.setStyleSheet("""
+            QPushButton {
+                background: #153a31;
+                border: 1px solid #31c98a;
+                border-radius: 8px;
+                color: #d9fff0;
+                font-weight: 700;
+                padding: 0 10px;
+            }
+            QPushButton:hover { background: #1c5745; }
+            QPushButton:pressed { background: #0f2d25; }
+            QPushButton:disabled {
+                background: #252b29;
+                border-color: #3c5149;
+                color: #75877f;
+            }
+        """)
+        self.btnAutoFix.setToolTip(
+            "Tự nhận diện xoay 90°/180° và lật gương cho các trang đã tích."
+        )
+        self.btnAutoFix.clicked.connect(self.auto_correct_pages)
 
 
         self.editStatus = QLabel(
             "Thay doi se duoc ap dung khi bam TACH PDF; PDF goc khong bi ghi de."
         )
 
-        self.editStatus.setStyleSheet("color: #336699;")
+        self.editStatus.setWordWrap(True)
+        self.editStatus.setStyleSheet("color: #9ecff0;")
 
         page_actions.addWidget(self.btnEditPage)
+        page_actions.addWidget(self.btnAutoFix)
         page_actions.addWidget(self.editStatus, 1)
 
-        editorLayout.addLayout(page_actions)
+        editorLayout.addWidget(self.pageActionsPanel)
 
-        layout.addWidget(self.editorCard, 1)
+        layout.addWidget(self.editorCard)
+        # Do not reserve a large empty page-editor panel before a PDF is
+        # selected.  It becomes visible as soon as a document is loaded.
+        self.editorCard.setVisible(False)
 
 
         #=========================
@@ -242,15 +331,13 @@ class MainWindow(QMainWindow):
 
         groupRange=QGroupBox("Khoảng trang")
 
-        groupRange.setMaximumHeight(125)
-
-        layout.addWidget(groupRange)
+        groupRange.setMaximumHeight(82)
 
         v=QVBoxLayout(groupRange)
 
         self.txtRange=QPlainTextEdit()
 
-        self.txtRange.setFixedHeight(78)
+        self.txtRange.setFixedHeight(46)
 
         self.txtRange.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -274,9 +361,7 @@ class MainWindow(QMainWindow):
 
         groupMerge=QGroupBox("GH\u00c9P TRANG TH\u00c0NH 1 PDF")
 
-        groupMerge.setMaximumHeight(88)
-
-        layout.addWidget(groupMerge)
+        groupMerge.setMaximumHeight(70)
 
         mergeLayout=QHBoxLayout(groupMerge)
 
@@ -300,15 +385,44 @@ class MainWindow(QMainWindow):
         mergeLayout.addWidget(self.txtMergePages, 1)
         mergeLayout.addWidget(self.btnMergePdf)
 
+        # These compact controls share a row and expand with the available
+        # width, keeping the split action visible without vertical scrolling.
+        outputOptions = QHBoxLayout()
+        outputOptions.setSpacing(6)
+        outputOptions.addWidget(groupRange, 1)
+        outputOptions.addWidget(groupMerge, 2)
+        layout.addLayout(outputOptions)
+
 
         #=========================
-        btnSplit=QPushButton("TÁCH PDF")
+        # Keep the main split actions visible while the form scrolls.
+        splitFooter = QFrame()
+        splitFooter.setObjectName("splitFooter")
+        splitFooter.setStyleSheet("""
+            QFrame#splitFooter {
+                background: #202020;
+                border-top: 1px solid #4a4a4a;
+            }
+        """)
+        split_actions = QHBoxLayout(splitFooter)
+        split_actions.setContentsMargins(8, 3, 8, 3)
+        split_actions.setSpacing(8)
 
-        btnSplit.setFixedHeight(42)
+        self.btnSplit=QPushButton("TÁCH PDF VÀ LƯU")
+        self.btnSplit.setFixedHeight(38)
+        self.btnSplit.setStyleSheet("""
+            QPushButton {
+                background: #303030;
+                border: 1px solid #565656;
+                border-radius: 6px;
+                color: #ffffff;
+            }
+            QPushButton:hover { background: #3d3d3d; }
+        """)
+        self.btnSplit.clicked.connect(self.do_split)
 
-        btnSplit.clicked.connect(self.do_split)
-
-        layout.addWidget(btnSplit)
+        split_actions.addWidget(self.btnSplit)
+        outerLayout.addWidget(splitFooter)
 
 
     def open_image_to_pdf(self):
@@ -351,6 +465,7 @@ class MainWindow(QMainWindow):
             return
 
         self.edited_pages = {}
+        self._thumbnail_cache.clear()
 
         self.current_page = 0
 
@@ -363,6 +478,8 @@ class MainWindow(QMainWindow):
         self.txtMergePages.setEnabled(True)
 
         self.btnMergePdf.setEnabled(True)
+
+        self.btnAutoFix.setEnabled(True)
 
         self.build_page_list()
 
@@ -379,6 +496,119 @@ class MainWindow(QMainWindow):
 
             self.txtSave.setText(folder)
 
+
+
+    def auto_correct_pages(self):
+
+        # This is a batch editing tool: never touch a page unless its green
+        # checkmark is visible in the page rail.
+        page_indices = self.checked_page_indices()
+        if not page_indices:
+            QMessageBox.warning(
+                self,
+                "Chưa chọn trang",
+                "Hãy tích các trang cần tự sửa trước khi bấm TỰ SỬA.",
+            )
+            return False
+
+        ocr_unavailable = False
+        try:
+            languages = ensure_ocr_available()
+        except OcrUnavailableError:
+            # The visual certificate-layout fallback can still rotate many
+            # scanned land certificates even when full OCR is unavailable.
+            languages = []
+            ocr_unavailable = True
+
+        progress = QProgressDialog(
+            "Đang phân tích trang bằng OCR...", "Hủy", 0, len(page_indices), self
+        )
+        progress.setWindowTitle("Tự động sửa PDF")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        # Avoid showing a distracting dialog for the fast one-page path.
+        progress.setMinimumDuration(350)
+        progress.setAutoClose(False)
+
+        updates = {}
+        failed_pages = []
+        action_log = []
+
+        for position, page_index in enumerate(page_indices, start=1):
+            progress.setValue(position - 1)
+            progress.setLabelText(
+                f"Đang sửa {position}/{len(page_indices)} trang đã tích "
+                f"(trang PDF {page_index + 1})..."
+            )
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                progress.close()
+                return False
+
+            source = self.page_model(page_index)
+            image = (
+                render_editable_image(source)
+                if source.annotations
+                else source.image.copy()
+            )
+
+            try:
+                correction = auto_correct_document(image, languages)
+            except Exception as error:
+                failed_pages.append(f"Trang {page_index + 1}: {error}")
+                continue
+
+            if correction.actions:
+                updates[page_index] = EditableImage(
+                    source.path,
+                    correction.image,
+                    source.original.copy(),
+                    [],
+                )
+                action_log.extend(correction.actions)
+
+        progress.setValue(len(page_indices))
+        progress.close()
+
+        if not updates:
+            detail = (
+                " OCR chưa sẵn sàng nên không thể kiểm tra lật gương."
+                if ocr_unavailable
+                else ""
+            )
+            QMessageBox.information(
+                self,
+                "Đã kiểm tra hướng trang",
+                "Không phát hiện trang nào cần xoay hoặc lật gương. "
+                "Trang được giữ nguyên theo chiều gốc." + detail,
+            )
+            return True
+
+        self.edited_pages.update(updates)
+        for page_index in updates:
+            self.invalidate_page_thumbnail(page_index)
+            self.refresh_page_list_item(page_index)
+        self.update_page_selection_status()
+        self.update_preview()
+
+        rotated = sum(action.startswith("xoay") for action in action_log)
+        mirrored = action_log.count("lật gương")
+        summary = [f"Đã sửa hướng {len(updates)} trang"]
+        if rotated:
+            summary.append(f"xoay {rotated} trang")
+        if mirrored:
+            summary.append(f"lật gương {mirrored} trang")
+        if failed_pages:
+            summary.append(f"bỏ qua {len(failed_pages)} trang lỗi OCR")
+        if ocr_unavailable:
+            summary.append("OCR chưa sẵn sàng: chưa kiểm tra lật gương")
+
+        QMessageBox.information(
+            self,
+            "Đã tự động sửa",
+            ". ".join(summary) + ".\n\n"
+            "Các thay đổi đang ở bộ nhớ. Bấm TÁCH PDF VÀ LƯU khi bạn đã kiểm tra xong; PDF gốc không bị ghi đè.",
+        )
+        return True
 
 
     def do_split(self):
@@ -549,6 +779,8 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
+        self.editorCard.setVisible(True)
+
         self.pageList.blockSignals(True)
         self.pageList.clear()
         self.checked_pages.clear()
@@ -568,18 +800,22 @@ class MainWindow(QMainWindow):
 
     def page_thumbnail(self, page_index, selected=False):
 
-        if page_index in self.edited_pages:
-            pix = pil_to_pixmap(
-                render_editable_image(self.edited_pages[page_index])
+        is_edited = page_index in self.edited_pages
+        cache_key = (page_index, is_edited)
+        thumbnail = self._thumbnail_cache.get(cache_key)
+        if thumbnail is None:
+            if is_edited:
+                pix = pil_to_pixmap(
+                    render_editable_image(self.edited_pages[page_index])
+                )
+            else:
+                pix = render_page_preview(self.doc, page_index, zoom=0.30)
+            thumbnail = pix.scaled(
+                self.pageList.iconSize(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
             )
-        else:
-            pix = render_page_preview(self.doc, page_index, zoom=0.30)
-
-        thumbnail = pix.scaled(
-            self.pageList.iconSize(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
+            self._thumbnail_cache[cache_key] = thumbnail
         return self.add_selected_badge(thumbnail) if selected else thumbnail
 
 
@@ -630,6 +866,12 @@ class MainWindow(QMainWindow):
         item.setIcon(QIcon(self.page_thumbnail(page_index, selected)))
 
 
+    def invalidate_page_thumbnail(self, page_index):
+        """Drop both the original and edited thumbnail variants for a page."""
+        self._thumbnail_cache.pop((page_index, False), None)
+        self._thumbnail_cache.pop((page_index, True), None)
+
+
     def checked_page_indices(self):
 
         return sorted(self.checked_pages)
@@ -677,17 +919,17 @@ class MainWindow(QMainWindow):
 
         if selected_count:
             self.pageSummary.setText(f"{summary} | \u0110\u00e3 t\u00edch: {selected_count}")
-            self.btnEditPage.setText(
-                f"CH\u1ec8NH S\u1eecA {selected_count} TRANG \u0110\u00c3 T\u00cdCH"
-            )
+            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA")
+            self.btnAutoFix.setText("✦ TỰ SỬA")
             self.editStatus.setText(
-                "Thao t\u00e1c h\u00e0ng lo\u1ea1t \u00e1p d\u1ee5ng cho c\u00e1c trang \u0111\u00e3 t\u00edch; m\u1ed7i trang v\u1eabn l\u01b0u ri\u00eang."
+                f"Áp dụng cho {selected_count} trang đã tích."
             )
         else:
             self.pageSummary.setText(summary)
-            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA TRANG \u0110ANG CH\u1eccN")
+            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA")
+            self.btnAutoFix.setText("✦ TỰ SỬA")
             self.editStatus.setText(
-                "B\u1ea5m th\u1ebb trang \u0111\u1ec3 ch\u1ecdn nhi\u1ec1u trang c\u00f9ng l\u00fac."
+                f"Áp dụng cho trang {self.current_page + 1}."
             )
 
 
@@ -817,6 +1059,7 @@ class MainWindow(QMainWindow):
                     self.edited_pages.pop(page_index, None)
                 else:
                     self.edited_pages[page_index] = updated
+                self.invalidate_page_thumbnail(page_index)
                 self.refresh_page_list_item(page_index)
 
             self.update_page_selection_status()
