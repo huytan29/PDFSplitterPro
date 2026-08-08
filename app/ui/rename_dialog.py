@@ -18,7 +18,8 @@ class RenameDialog(QDialog):
                  start,
                  end,
                  parent=None,
-                 edited_pages=None):
+                 edited_pages=None,
+                 page_order=None):
 
         super().__init__(parent)
 
@@ -109,6 +110,9 @@ class RenameDialog(QDialog):
         self.current_page = start
         self.rotation = 0
         self.edited_pages = edited_pages if edited_pages is not None else {}
+        self.page_order = (
+            page_order if page_order is not None else list(range(doc.page_count))
+        )
 
         #self.preview = QLabel()
 
@@ -227,7 +231,7 @@ class RenameDialog(QDialog):
     def update_preview(self):
 
         edited_count = sum(
-            page_number - 1 in self.edited_pages
+            self.page_order[page_number - 1] in self.edited_pages
             for page_number in range(self.start, self.end + 1)
         )
         if edited_count:
@@ -253,7 +257,7 @@ class RenameDialog(QDialog):
 
         for page_number in range(self.start, self.end + 1):
 
-            page_index = page_number - 1
+            page_index = self.page_order[page_number - 1]
 
             if page_index in self.edited_pages:
 

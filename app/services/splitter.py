@@ -62,25 +62,31 @@ def parse_page_selection(selection, total_pages):
     return pages
 
 
-def merge_selected_pages(pdf_file, output_file, page_numbers):
+def merge_selected_pages(pdf_file, output_file, page_numbers, page_order=None):
     """Ghep cac trang da chon cua mot PDF thanh mot file PDF moi."""
     reader = PdfReader(pdf_file)
     writer = PdfWriter()
+    if page_order is None:
+        page_order = list(range(len(reader.pages)))
 
     for page_number in page_numbers:
-        writer.add_page(reader.pages[page_number - 1])
+        source_page_index = page_order[page_number - 1]
+        writer.add_page(reader.pages[source_page_index])
 
     with open(output_file, "wb") as file:
         writer.write(file)
 
 
-def merge_pdf_with_edits(doc, output_file, page_numbers, edited_pages):
+def merge_pdf_with_edits(
+        doc, output_file, page_numbers, edited_pages, page_order=None):
     """Ghep trang, dong thoi dua cac chinh sua dang nam trong bo nho vao file."""
     output_doc = fitz.open()
+    if page_order is None:
+        page_order = list(range(doc.page_count))
 
     try:
         for page_number in page_numbers:
-            page_index = page_number - 1
+            page_index = page_order[page_number - 1]
 
             if page_index in edited_pages:
                 append_edited_page(
@@ -127,9 +133,12 @@ def split_pdf(pdf_file,
               save_folder,
               ranges,
               filenames,
-              rotations):
+              rotations,
+              page_order=None):
 
     reader = PdfReader(pdf_file)
+    if page_order is None:
+        page_order = list(range(len(reader.pages)))
 
     for (start, end), name, rotation in zip(
             ranges,
@@ -138,9 +147,9 @@ def split_pdf(pdf_file,
 
         writer = PdfWriter()
 
-        for page in range(start - 1, end):
+        for position in range(start - 1, end):
 
-            page_obj = reader.pages[page]
+            page_obj = reader.pages[page_order[position]]
 
             if rotation != 0:
                 page_obj = page_obj.rotate(rotation)
@@ -149,15 +158,8 @@ def split_pdf(pdf_file,
 
         output = create_filename(save_folder, name)
 
-        try:
-            with open(output, "wb") as f:
-                writer.write(f)
-
-            print("Đã lưu:", output)
-
-        except Exception as e:
-            print("Lỗi:", e)
-            raise
+        with open(output, "wb") as f:
+            writer.write(f)
 
 
 def append_edited_page(output_doc, source_doc, page_index, model):
@@ -188,17 +190,22 @@ def split_pdf_with_edits(doc,
                          ranges,
                          filenames,
                          rotations,
-                         edited_pages):
+                         edited_pages,
+                         page_order=None):
     """Tach PDF va ap dung cac chinh sua dang nam trong bo nho.
 
     Cac trang chua chinh sua duoc sao chep nguyen trang; chi trang da sua
     moi duoc render thanh anh de ho tro cat, lat guong va bo loc scan.
     """
+    if page_order is None:
+        page_order = list(range(doc.page_count))
+
     for (start, end), name, rotation in zip(ranges, filenames, rotations):
         output_doc = fitz.open()
 
         try:
-            for page_index in range(start - 1, end):
+            for position in range(start - 1, end):
+                page_index = page_order[position]
                 if page_index in edited_pages:
                     output_page = append_edited_page(
                         output_doc,
@@ -219,7 +226,6 @@ def split_pdf_with_edits(doc,
 
             output = create_filename(save_folder, name)
             output_doc.save(output, garbage=4, deflate=True)
-            print("Da luu:", output)
 
         finally:
             output_doc.close()

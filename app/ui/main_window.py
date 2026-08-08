@@ -30,6 +30,103 @@ from app.ui.image_pdf_dialog import ImageToPdfDialog
 from app.ui.rename_dialog import RenameDialog
 
 
+class ReorderablePageList(QListWidget):
+    """Horizontal page rail with mouse-driven reordering independent of Qt DnD."""
+
+    orderChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mouse_drag_item = None
+        self._mouse_press_position = QPoint()
+        self._mouse_dragging = False
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._mouse_drag_item = self.itemAt(event.position().toPoint())
+            self._mouse_press_position = event.position().toPoint()
+            self._mouse_dragging = False
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._mouse_drag_item is None
+            or not event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            super().mouseMoveEvent(event)
+            return
+
+        position = event.position().toPoint()
+        if not self._mouse_dragging:
+            distance = (position - self._mouse_press_position).manhattanLength()
+            if distance < QApplication.startDragDistance():
+                super().mouseMoveEvent(event)
+                return
+            self._mouse_dragging = True
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+
+        self._auto_scroll_for_drag(position.x())
+        source_row = self.row(self._mouse_drag_item)
+        target_item = self.itemAt(position)
+        if target_item is not None:
+            self.move_page_to_row(source_row, self.row(target_item))
+        elif self.count():
+            first_rect = self.visualItemRect(self.item(0))
+            last_rect = self.visualItemRect(self.item(self.count() - 1))
+            if position.x() < first_rect.left():
+                self.move_page_to_row(source_row, 0)
+            elif position.x() > last_rect.right():
+                self.move_page_to_row(source_row, self.count() - 1)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        was_dragging = self._mouse_dragging
+        self._mouse_drag_item = None
+        self._mouse_dragging = False
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        if was_dragging:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _auto_scroll_for_drag(self, x_position):
+        scroll_bar = self.horizontalScrollBar()
+        margin = 36
+        step = max(30, scroll_bar.singleStep() * 4)
+        if x_position < margin:
+            scroll_bar.setValue(scroll_bar.value() - step)
+        elif x_position > self.viewport().width() - margin:
+            scroll_bar.setValue(scroll_bar.value() + step)
+
+    def move_page(self, source_row, target_row):
+        """Move a row to an insertion position and emit one order event."""
+        if not 0 <= source_row < self.count():
+            return False
+
+        target_row = max(0, min(target_row, self.count()))
+        if source_row < target_row:
+            target_row -= 1
+        if source_row == target_row:
+            return False
+
+        signals_were_blocked = self.blockSignals(True)
+        item = self.takeItem(source_row)
+        self.insertItem(target_row, item)
+        self.setCurrentItem(item)
+        self.blockSignals(signals_were_blocked)
+        self.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+        self.orderChanged.emit()
+        return True
+
+    def move_page_to_row(self, source_row, final_row):
+        """Move a page to an exact visible row."""
+        if not 0 <= final_row < self.count():
+            return False
+        insertion_row = final_row if final_row < source_row else final_row + 1
+        return self.move_page(source_row, insertion_row)
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -43,6 +140,8 @@ class MainWindow(QMainWindow):
         self.save_folder=""
         self.doc=None
         self.current_page = 0
+        # Display order contains zero-based page indexes from the source PDF.
+        self.page_order = []
         self.edited_pages = {}
         self.checked_pages = set()
         self._thumbnail_cache = {}
@@ -173,16 +272,13 @@ class MainWindow(QMainWindow):
         pageRailLayout.addLayout(pageRailHeader)
 
         self.pageRailHint = QLabel(
-            "T\u00edch \u00f4 \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang; b\u1ea5m th\u1ebb \u0111\u1ec3 ch\u1ecdn trang ri\u00eang."
-        )
-        self.pageRailHint.setText(
-            "B\u1ea5m th\u1ebb trang \u0111\u1ec3 ch\u1ecdn ho\u1eb7c b\u1ecf ch\u1ecdn; d\u1ea5u \u2713 xanh hi\u1ec3n th\u1ecb ngay tr\u00ean \u1ea3nh."
+            "B\u1ea5m th\u1ebb \u0111\u1ec3 ch\u1ecdn; k\u00e9o th\u1ebb sang tr\u00e1i/ph\u1ea3i \u0111\u1ec3 \u0111\u1ed5i th\u1ee9 t\u1ef1 trang."
         )
         self.pageRailHint.setWordWrap(True)
         self.pageRailHint.setStyleSheet("color: #9ab6ca;")
         pageRailLayout.addWidget(self.pageRailHint)
 
-        self.pageList = QListWidget()
+        self.pageList = ReorderablePageList()
         self.pageList.setIconSize(QSize(120, 140))
         # A single compact row: enough for image + caption without the large
         # empty band that a fixed, oversized thumbnail area created.
@@ -191,6 +287,8 @@ class MainWindow(QMainWindow):
         self.pageList.setFlow(QListView.Flow.LeftToRight)
         self.pageList.setWrapping(False)
         self.pageList.setResizeMode(QListView.ResizeMode.Adjust)
+        # Reordering is handled directly by ReorderablePageList mouse events.
+        # Native Qt drag/drop is disabled so platform DnD cannot swallow moves.
         self.pageList.setMovement(QListView.Movement.Static)
         self.pageList.setWordWrap(True)
         self.pageList.setUniformItemSizes(True)
@@ -199,6 +297,9 @@ class MainWindow(QMainWindow):
         self.pageList.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.pageList.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.pageList.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.pageList.setDragEnabled(False)
+        self.pageList.setAcceptDrops(False)
+        self.pageList.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         # One complete tile remains visible at high-DPI scaling.  Extra pages
         # use the horizontal rail rather than expanding the form vertically.
         self.pageList.setFixedHeight(206)
@@ -223,15 +324,24 @@ class MainWindow(QMainWindow):
         """)
         self.pageList.itemSelectionChanged.connect(self.select_page_from_list)
         self.pageList.itemClicked.connect(self.toggle_page_checked)
+        self.pageList.orderChanged.connect(self.on_page_order_changed)
         pageRailLayout.addWidget(self.pageList, 1)
 
         pageRailButtons = QHBoxLayout()
+        self.btnMovePageLeft = QPushButton("◀ Sang trái")
+        self.btnMovePageRight = QPushButton("Sang phải ▶")
         self.btnSelectAllPages = QPushButton("T\u00edch t\u1ea5t c\u1ea3")
         self.btnClearPageSelection = QPushButton("B\u1ecf ch\u1ecdn")
+        self.btnMovePageLeft.setEnabled(False)
+        self.btnMovePageRight.setEnabled(False)
         self.btnSelectAllPages.setEnabled(False)
         self.btnClearPageSelection.setEnabled(False)
+        self.btnMovePageLeft.clicked.connect(lambda: self.move_current_page(-1))
+        self.btnMovePageRight.clicked.connect(lambda: self.move_current_page(1))
         self.btnSelectAllPages.clicked.connect(lambda: self.set_all_pages_checked(True))
         self.btnClearPageSelection.clicked.connect(lambda: self.set_all_pages_checked(False))
+        pageRailButtons.addWidget(self.btnMovePageLeft)
+        pageRailButtons.addWidget(self.btnMovePageRight)
         pageRailButtons.addWidget(self.btnSelectAllPages)
         pageRailButtons.addWidget(self.btnClearPageSelection)
         pageRailLayout.addLayout(pageRailButtons)
@@ -503,12 +613,14 @@ class MainWindow(QMainWindow):
 
         self.pageRailTitle.setText("PAGES TO EDIT" if english else "TRANG CẦN CHỈNH SỬA")
         self.pageRailHint.setText(
-            "Click a page card to select or clear it; the green ✓ appears on the image."
+            "Click a page card to select it; drag cards left or right to reorder pages."
             if english
-            else "Bấm thẻ trang để chọn hoặc bỏ chọn; dấu ✓ xanh hiển thị ngay trên ảnh."
+            else "Bấm thẻ để chọn; kéo thẻ sang trái/phải để đổi thứ tự trang."
         )
         self.btnSelectAllPages.setText("Select all" if english else "Tích tất cả")
         self.btnClearPageSelection.setText("Clear selection" if english else "Bỏ chọn")
+        self.btnMovePageLeft.setText("◀ Move left" if english else "◀ Sang trái")
+        self.btnMovePageRight.setText("Move right ▶" if english else "Sang phải ▶")
         self.btnEditPage.setText("EDIT" if english else "CHỈNH SỬA")
         self.btnAutoFix.setText("✦ AUTO FIX" if english else "✦ TỰ SỬA")
         self.btnAutoFix.setToolTip(
@@ -595,12 +707,17 @@ class MainWindow(QMainWindow):
         self._thumbnail_cache.clear()
 
         self.current_page = 0
+        self.page_order = list(range(self.doc.page_count))
 
         self.btnEditPage.setEnabled(True)
 
         self.btnSelectAllPages.setEnabled(True)
 
         self.btnClearPageSelection.setEnabled(True)
+
+        self.btnMovePageLeft.setEnabled(True)
+
+        self.btnMovePageRight.setEnabled(True)
 
         self.txtMergePages.setEnabled(True)
 
@@ -677,10 +794,11 @@ class MainWindow(QMainWindow):
         action_log = []
 
         for position, page_index in enumerate(page_indices, start=1):
+            display_page = self.page_position(page_index) + 1
             progress.setValue(position - 1)
             progress.setLabelText(
                 f"Đang sửa {position}/{len(page_indices)} trang đã tích "
-                f"(trang PDF {page_index + 1})..."
+                f"(vị trí {display_page})..."
             )
             QApplication.processEvents()
             if progress.wasCanceled():
@@ -697,7 +815,7 @@ class MainWindow(QMainWindow):
             try:
                 correction = auto_correct_document(image, languages)
             except Exception as error:
-                failed_pages.append(f"Trang {page_index + 1}: {error}")
+                failed_pages.append(f"Vị trí {display_page}: {error}")
                 continue
 
             if correction.actions:
@@ -801,7 +919,8 @@ class MainWindow(QMainWindow):
                 start,
                 end,
                 self,
-                edited_pages=self.edited_pages
+                edited_pages=self.edited_pages,
+                page_order=self.page_order,
             )
 
             if dlg.exec():
@@ -824,7 +943,8 @@ class MainWindow(QMainWindow):
                 ranges,
                 filenames,
                 rotations,
-                self.edited_pages
+                self.edited_pages,
+                self.page_order,
             )
 
         else:
@@ -834,7 +954,8 @@ class MainWindow(QMainWindow):
                 self.save_folder,
                 ranges,
                 filenames,
-                rotations
+                rotations,
+                self.page_order,
             )
 
         QMessageBox.information(
@@ -895,12 +1016,14 @@ class MainWindow(QMainWindow):
                     output,
                     page_numbers,
                     self.edited_pages,
+                    self.page_order,
                 )
             else:
                 merge_selected_pages(
                     self.pdf_path,
                     output,
                     page_numbers,
+                    self.page_order,
                 )
         except Exception as error:
             QMessageBox.critical(
@@ -928,17 +1051,66 @@ class MainWindow(QMainWindow):
         self.pageList.clear()
         self.checked_pages.clear()
 
-        for page_index in range(self.doc.page_count):
+        if sorted(self.page_order) != list(range(self.doc.page_count)):
+            self.page_order = list(range(self.doc.page_count))
+
+        for display_index, page_index in enumerate(self.page_order):
             item = QListWidgetItem(
                 QIcon(self.page_thumbnail(page_index)),
-                self.page_list_label(page_index),
+                self.page_list_label(page_index, display_index),
             )
             item.setData(Qt.ItemDataRole.UserRole, page_index)
+            self.update_page_item_tooltip(item, page_index, display_index)
             self.pageList.addItem(item)
 
-        self.pageList.setCurrentRow(self.current_page)
+        self.pageList.setCurrentRow(self.page_position(self.current_page))
         self.pageList.blockSignals(False)
         self.update_page_selection_status()
+
+
+    def on_page_order_changed(self):
+        """Persist the card order while keeping edits tied to source pages."""
+        self.page_order = [
+            self.pageList.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.pageList.count())
+        ]
+
+        current_item = self.pageList.currentItem()
+        if current_item is not None:
+            self.current_page = current_item.data(Qt.ItemDataRole.UserRole)
+
+        self.refresh_all_page_list_items()
+        self.update_page_selection_status()
+
+
+    def move_current_page(self, direction):
+        """Move the active page one position with the fallback arrow buttons."""
+        if self.doc is None:
+            return
+        source_row = self.pageList.currentRow()
+        target_row = source_row + direction
+        self.pageList.move_page_to_row(source_row, target_row)
+
+
+    def page_position(self, page_index):
+        """Return the zero-based visible position of a source page."""
+        try:
+            return self.page_order.index(page_index)
+        except ValueError:
+            return 0
+
+
+    def update_page_item_tooltip(self, item, page_index, display_index):
+        if self.ui_language == "en":
+            item.setToolTip(
+                f"Position {display_index + 1} | Original page {page_index + 1}\n"
+                "Drag left or right to change the output order."
+            )
+        else:
+            item.setToolTip(
+                f"Vị trí {display_index + 1} | Trang gốc {page_index + 1}\n"
+                "Kéo sang trái hoặc phải để đổi thứ tự xuất."
+            )
 
 
     def page_thumbnail(self, page_index, selected=False):
@@ -990,12 +1162,15 @@ class MainWindow(QMainWindow):
         return result
 
 
-    def page_list_label(self, page_index):
+    def page_list_label(self, page_index, display_index=None):
+
+        if display_index is None:
+            display_index = self.page_position(page_index)
 
         label = (
-            f"Page {page_index + 1}"
+            f"Page {display_index + 1}"
             if self.ui_language == "en"
-            else f"Trang {page_index + 1}"
+            else f"Trang {display_index + 1}"
         )
         if page_index in self.edited_pages:
             label += " (edited)" if self.ui_language == "en" else " (đã sửa)"
@@ -1004,13 +1179,21 @@ class MainWindow(QMainWindow):
 
     def refresh_page_list_item(self, page_index):
 
-        item = self.pageList.item(page_index)
+        display_index = self.page_position(page_index)
+        item = self.pageList.item(display_index)
         if item is None:
             return
 
-        item.setText(self.page_list_label(page_index))
+        item.setText(self.page_list_label(page_index, display_index))
+        self.update_page_item_tooltip(item, page_index, display_index)
         selected = page_index in self.checked_pages
         item.setIcon(QIcon(self.page_thumbnail(page_index, selected)))
+
+
+    def refresh_all_page_list_items(self):
+
+        for page_index in self.page_order:
+            self.refresh_page_list_item(page_index)
 
 
     def invalidate_page_thumbnail(self, page_index):
@@ -1021,17 +1204,21 @@ class MainWindow(QMainWindow):
 
     def checked_page_indices(self):
 
-        return sorted(self.checked_pages)
+        return [
+            page_index
+            for page_index in self.page_order
+            if page_index in self.checked_pages
+        ]
 
 
     def set_all_pages_checked(self, checked):
 
         if checked:
-            self.checked_pages = set(range(self.pageList.count()))
+            self.checked_pages = set(self.page_order)
         else:
             self.checked_pages.clear()
 
-        for page_index in range(self.pageList.count()):
+        for page_index in self.page_order:
             self.refresh_page_list_item(page_index)
         self.update_page_selection_status()
 
@@ -1058,17 +1245,24 @@ class MainWindow(QMainWindow):
 
         selected_count = len(self.checked_page_indices())
         self.btnEditPage.setEnabled(True)
+        current_position = self.page_position(self.current_page) + 1
+        order_changed = self.page_order != list(range(self.doc.page_count))
+        self.btnMovePageLeft.setEnabled(current_position > 1)
+        self.btnMovePageRight.setEnabled(current_position < self.doc.page_count)
 
         if self.ui_language == "en":
             summary = (
                 f"{self.doc.page_count} pages | "
-                f"Current page: {self.current_page + 1}"
+                f"Current position: {current_position}"
             )
         else:
             summary = (
                 f"{self.doc.page_count} trang | "
-                f"Trang đang chọn: {self.current_page + 1}"
+                f"Vị trí đang chọn: {current_position}"
             )
+
+        if order_changed:
+            summary += " | Reordered" if self.ui_language == "en" else " | Đã đổi thứ tự"
 
         if selected_count:
             selected_label = "Selected" if self.ui_language == "en" else "Đã tích"
@@ -1085,9 +1279,9 @@ class MainWindow(QMainWindow):
             self.btnEditPage.setText("EDIT" if self.ui_language == "en" else "CHỈNH SỬA")
             self.btnAutoFix.setText("✦ AUTO FIX" if self.ui_language == "en" else "✦ TỰ SỬA")
             self.editStatus.setText(
-                f"Applies to page {self.current_page + 1}."
+                f"Applies to page at position {current_position}."
                 if self.ui_language == "en"
-                else f"Áp dụng cho trang {self.current_page + 1}."
+                else f"Áp dụng cho trang ở vị trí {current_position}."
             )
 
 
@@ -1123,7 +1317,8 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        self.set_current_page(page_number - 1)
+        position = max(0, min(page_number - 1, len(self.page_order) - 1))
+        self.set_current_page(self.page_order[position])
 
 
     def set_current_page(self, page_index):
@@ -1137,7 +1332,7 @@ class MainWindow(QMainWindow):
 
         if self.pageList.count():
             self.pageList.blockSignals(True)
-            self.pageList.setCurrentRow(page_index)
+            self.pageList.setCurrentRow(self.page_position(page_index))
             self.pageList.blockSignals(False)
 
         self.update_preview()
@@ -1147,9 +1342,10 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        if self.current_page < self.doc.page_count - 1:
+        position = self.page_position(self.current_page)
+        if position < len(self.page_order) - 1:
 
-            self.set_current_page(self.current_page + 1)
+            self.set_current_page(self.page_order[position + 1])
 
 
     def prev_page(self):
@@ -1157,9 +1353,10 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        if self.current_page > 0:
+        position = self.page_position(self.current_page)
+        if position > 0:
 
-            self.set_current_page(self.current_page - 1)
+            self.set_current_page(self.page_order[position - 1])
 
 
     def page_model(self, page_index):
@@ -1173,7 +1370,7 @@ class MainWindow(QMainWindow):
         image = render_page_image(self.doc, page_index)
 
         return EditableImage(
-            f"Trang {page_index + 1}",
+            f"Trang {self.page_position(page_index) + 1}",
             image.copy(),
             image.copy()
         )
@@ -1197,7 +1394,7 @@ class MainWindow(QMainWindow):
             # Mo ban sao lam viec: dong hop thoai Huy se khong anh huong trang goc.
             working_pages.append(
                 EditableImage(
-                    source.path,
+                    f"Trang {self.page_position(page_index) + 1}",
                     source.image.copy(),
                     source.original.copy(),
                     copy.deepcopy(source.annotations)
