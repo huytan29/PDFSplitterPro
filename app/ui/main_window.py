@@ -1,4 +1,5 @@
 import copy
+import os
 import fitz
 
 from PySide6.QtWidgets import *
@@ -13,7 +14,13 @@ from app.models.editable_image import (
     render_editable_image,
 )
 from app.services.preview import render_page_image, render_page_preview
-from app.services.splitter import split_pdf, split_pdf_with_edits
+from app.services.splitter import (
+    merge_pdf_with_edits,
+    merge_selected_pages,
+    parse_page_selection,
+    split_pdf,
+    split_pdf_with_edits,
+)
 from app.ui.image_pdf_dialog import ImageToPdfDialog
 from app.ui.rename_dialog import RenameDialog
 
@@ -24,7 +31,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("PDF Splitter Pro")
-        self.resize(1000,750)
+        self.resize(1200,900)
+        self.setMinimumSize(960,700)
 
         self.pdf_path=""
         self.save_folder=""
@@ -76,85 +84,115 @@ class MainWindow(QMainWindow):
 
 
         #=========================
-        # Preview
+        # PAGE EDITOR
         #=========================
 
-#        self.preview=QLabel()
+        self.editorCard = QFrame()
+        self.editorCard.setObjectName("editorCard")
+        self.editorCard.setStyleSheet("""
+            QFrame#editorCard {
+                background: #1c1c1c;
+                border: 1px solid #505050;
+                border-radius: 10px;
+            }
+        """)
+        editorLayout = QVBoxLayout(self.editorCard)
+        editorLayout.setContentsMargins(10, 10, 10, 10)
+        editorLayout.setSpacing(8)
 
-#        self.preview.setFixedHeight(420)
-
-#        self.preview.setAlignment(Qt.AlignCenter)
-
-#        self.preview.setStyleSheet("""
-#        border:1px solid gray;
-#        background:white;
-#        """)
-
-        self.scroll = QScrollArea()
-
-        self.scroll.setWidgetResizable(True)
-
-        self.scroll.setAlignment(Qt.AlignCenter)
-
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        self.preview = QLabel()
-
-        self.preview.setAlignment(Qt.AlignCenter)
-
-        self.preview.setStyleSheet("""
-        background:white;
+        self.pageRail = QWidget()
+        self.pageRail.setMinimumHeight(460)
+        self.pageRail.setStyleSheet("""
+            QWidget {
+                background: #1d1d1d;
+                border: 1px solid #454545;
+                border-radius: 8px;
+            }
+            QLabel {
+                border: none;
+            }
         """)
 
-        self.scroll.setWidget(self.preview)
+        pageRailLayout = QVBoxLayout(self.pageRail)
+        pageRailLayout.setContentsMargins(8, 8, 8, 8)
 
-        layout.addWidget(self.scroll, 1)
+        pageRailHeader = QHBoxLayout()
 
-        self.lblPages=QLabel("Số trang: 0")
+        pageRailTitle = QLabel("TRANG C\u1ea6N CH\u1ec8NH S\u1eecA")
+        pageRailTitle.setStyleSheet("font-size: 15px; font-weight: 700;")
+        pageRailHeader.addWidget(pageRailTitle)
+        pageRailHeader.addStretch()
 
-        layout.addWidget(self.lblPages)
+        self.pageSummary = QLabel("Ch\u01b0a ch\u1ecdn PDF")
+        self.pageSummary.setStyleSheet(
+            "background: #2b2b2b; border-radius: 6px; padding: 5px 9px;"
+        )
+        pageRailHeader.addWidget(self.pageSummary)
+        pageRailLayout.addLayout(pageRailHeader)
 
-        nav = QHBoxLayout()
+        pageRailHint = QLabel(
+            "T\u00edch \u00f4 \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang; b\u1ea5m th\u1ebb \u0111\u1ec3 ch\u1ecdn trang ri\u00eang."
+        )
+        pageRailHint.setWordWrap(True)
+        pageRailHint.setStyleSheet("color: #9ab6ca;")
+        pageRailLayout.addWidget(pageRailHint)
 
-        self.btnPrev = QPushButton("◀ Trang trước")
+        self.pageList = QListWidget()
+        self.pageList.setIconSize(QSize(145, 180))
+        self.pageList.setGridSize(QSize(185, 235))
+        self.pageList.setViewMode(QListView.ViewMode.IconMode)
+        self.pageList.setFlow(QListView.Flow.LeftToRight)
+        self.pageList.setWrapping(True)
+        self.pageList.setResizeMode(QListView.ResizeMode.Adjust)
+        self.pageList.setMovement(QListView.Movement.Static)
+        self.pageList.setWordWrap(True)
+        self.pageList.setSpacing(8)
+        self.pageList.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pageList.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.pageList.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.pageList.setStyleSheet("""
+            QListWidget {
+                background: #202020;
+                border: 1px solid #4a4a4a;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                background: #2a2a2a;
+                border: 1px solid #3b3b3b;
+                border-radius: 6px;
+                margin: 4px;
+                padding: 7px;
+            }
+            QListWidget::item:selected {
+                background: #243d50;
+                border: 2px solid #3daee9;
+            }
+        """)
+        self.pageList.itemSelectionChanged.connect(self.select_page_from_list)
+        self.pageList.itemChanged.connect(self.update_page_selection_status)
+        pageRailLayout.addWidget(self.pageList, 1)
 
-        self.btnNext = QPushButton("Trang sau ▶")
+        pageRailButtons = QHBoxLayout()
+        self.btnSelectAllPages = QPushButton("T\u00edch t\u1ea5t c\u1ea3")
+        self.btnClearPageSelection = QPushButton("B\u1ecf ch\u1ecdn")
+        self.btnSelectAllPages.setEnabled(False)
+        self.btnClearPageSelection.setEnabled(False)
+        self.btnSelectAllPages.clicked.connect(lambda: self.set_all_pages_checked(True))
+        self.btnClearPageSelection.clicked.connect(lambda: self.set_all_pages_checked(False))
+        pageRailButtons.addWidget(self.btnSelectAllPages)
+        pageRailButtons.addWidget(self.btnClearPageSelection)
+        pageRailLayout.addLayout(pageRailButtons)
 
-        self.lblCurrent = QLabel("Trang 1")
-
-        self.pageSlider = QSlider(Qt.Horizontal)
-
-        self.pageSlider.setRange(1, 1)
-
-        self.pageSlider.setEnabled(False)
-
-        self.pageSpin = QSpinBox()
-
-        self.pageSpin.setRange(1, 1)
-
-        self.pageSpin.setEnabled(False)
-
-        nav.addWidget(self.btnPrev)
-        nav.addWidget(self.lblCurrent)
-        nav.addWidget(QLabel("Lướt trang:"))
-        nav.addWidget(self.pageSlider, 1)
-        nav.addWidget(self.pageSpin)
-        nav.addWidget(self.btnNext)
-
-        layout.addLayout(nav)
-
-        self.btnPrev.clicked.connect(self.prev_page)
-        self.btnNext.clicked.connect(self.next_page)
-        self.pageSlider.valueChanged.connect(self.select_page_from_control)
-        self.pageSpin.valueChanged.connect(self.select_page_from_control)
+        editorLayout.addWidget(self.pageRail, 1)
 
         page_actions = QHBoxLayout()
 
         self.btnEditPage = QPushButton("CHỈNH SỬA TRANG HIỆN TẠI")
 
         self.btnEditPage.setEnabled(False)
+
+        self.btnEditPage.setMinimumHeight(36)
 
         self.btnEditPage.clicked.connect(self.edit_current_page)
 
@@ -168,7 +206,9 @@ class MainWindow(QMainWindow):
         page_actions.addWidget(self.btnEditPage)
         page_actions.addWidget(self.editStatus, 1)
 
-        layout.addLayout(page_actions)
+        editorLayout.addLayout(page_actions)
+
+        layout.addWidget(self.editorCard, 1)
 
 
         #=========================
@@ -198,11 +238,20 @@ class MainWindow(QMainWindow):
 
         groupRange=QGroupBox("Khoảng trang")
 
+        groupRange.setMaximumHeight(125)
+
         layout.addWidget(groupRange)
 
         v=QVBoxLayout(groupRange)
 
         self.txtRange=QPlainTextEdit()
+
+        self.txtRange.setFixedHeight(78)
+
+        self.txtRange.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
 
         self.txtRange.setPlaceholderText(
 """Ví dụ
@@ -216,9 +265,42 @@ class MainWindow(QMainWindow):
 
 
         #=========================
+        # MERGE SELECTED PAGES
+        #=========================
+
+        groupMerge=QGroupBox("GH\u00c9P TRANG TH\u00c0NH 1 PDF")
+
+        groupMerge.setMaximumHeight(88)
+
+        layout.addWidget(groupMerge)
+
+        mergeLayout=QHBoxLayout(groupMerge)
+
+        self.txtMergePages=QLineEdit()
+
+        self.txtMergePages.setPlaceholderText(
+            "V\u00ed d\u1ee5: 1,3  |  1-3  |  1,3,5  |  1-3,5,8-10"
+        )
+
+        self.txtMergePages.setEnabled(False)
+
+        self.btnMergePdf=QPushButton("CH\u1eccN V\u00c0 GH\u00c9P PDF")
+
+        self.btnMergePdf.setFixedHeight(34)
+        self.btnMergePdf.setMinimumWidth(210)
+
+        self.btnMergePdf.setEnabled(False)
+
+        self.btnMergePdf.clicked.connect(self.do_merge)
+
+        mergeLayout.addWidget(self.txtMergePages, 1)
+        mergeLayout.addWidget(self.btnMergePdf)
+
+
+        #=========================
         btnSplit=QPushButton("TÁCH PDF")
 
-        btnSplit.setMinimumHeight(50)
+        btnSplit.setFixedHeight(42)
 
         btnSplit.clicked.connect(self.do_split)
 
@@ -266,48 +348,19 @@ class MainWindow(QMainWindow):
 
         self.edited_pages = {}
 
-        self.lblPages.setText(f"Số trang: {self.doc.page_count}")
-
-#        pix=render_page_preview(self.doc,0)
-
-#        self.preview.setPixmap(
-#            pix.scaled(
-#                350,
-#                500,
-#                Qt.KeepAspectRatio,
-#                Qt.SmoothTransformation
-#            )
-#        )
-
-
         self.current_page = 0
-
-        self.pageSlider.blockSignals(True)
-
-        self.pageSpin.blockSignals(True)
-
-        self.pageSlider.setRange(1, self.doc.page_count)
-
-        self.pageSpin.setRange(1, self.doc.page_count)
-
-        self.pageSlider.setValue(1)
-
-        self.pageSpin.setValue(1)
-
-        self.pageSlider.setEnabled(self.doc.page_count > 1)
-
-        self.pageSpin.setEnabled(True)
-
-        self.pageSlider.blockSignals(False)
-
-        self.pageSpin.blockSignals(False)
 
         self.btnEditPage.setEnabled(True)
 
+        self.btnSelectAllPages.setEnabled(True)
 
-        self.lblCurrent.setText(
-            f"Trang 1/{self.doc.page_count}"
-        )
+        self.btnClearPageSelection.setEnabled(True)
+
+        self.txtMergePages.setEnabled(True)
+
+        self.btnMergePdf.setEnabled(True)
+
+        self.build_page_list()
 
         self.update_preview()
 
@@ -412,34 +465,201 @@ class MainWindow(QMainWindow):
             "Hoàn thành",
             "Đã tách PDF thành công."
         )
-    def update_preview(self):
+
+
+    def do_merge(self):
+
+        if self.doc is None:
+
+            QMessageBox.warning(self, "L\u1ed7i", "Ch\u01b0a ch\u1ecdn PDF")
+
+            return
+
+        try:
+            page_numbers = parse_page_selection(
+                self.txtMergePages.text(),
+                self.doc.page_count,
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, "L\u1ed7i ch\u1ecdn trang", str(error))
+            return
+
+        source_name = os.path.splitext(os.path.basename(self.pdf_path))[0]
+        initial_folder = self.save_folder or os.path.dirname(self.pdf_path)
+        suggested_file = os.path.join(initial_folder, f"{source_name}_ghep.pdf")
+
+        output, _ = QFileDialog.getSaveFileName(
+            self,
+            "L\u01b0u PDF \u0111\u00e3 gh\u00e9p",
+            suggested_file,
+            "PDF (*.pdf)",
+        )
+
+        if not output:
+            return
+
+        if not output.lower().endswith(".pdf"):
+            output += ".pdf"
+
+        if os.path.normcase(os.path.abspath(output)) == os.path.normcase(
+            os.path.abspath(self.pdf_path)
+        ):
+            QMessageBox.warning(
+                self,
+                "L\u1ed7i",
+                "Kh\u00f4ng th\u1ec3 ghi \u0111\u00e8 PDF ngu\u1ed3n. H\u00e3y ch\u1ecdn t\u00ean file kh\u00e1c.",
+            )
+            return
+
+        try:
+            if self.edited_pages:
+                merge_pdf_with_edits(
+                    self.doc,
+                    output,
+                    page_numbers,
+                    self.edited_pages,
+                )
+            else:
+                merge_selected_pages(
+                    self.pdf_path,
+                    output,
+                    page_numbers,
+                )
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "L\u1ed7i gh\u00e9p PDF",
+                f"Kh\u00f4ng th\u1ec3 gh\u00e9p PDF.\n{error}",
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Ho\u00e0n th\u00e0nh",
+            f"\u0110\u00e3 gh\u00e9p {len(page_numbers)} trang th\u00e0nh c\u00f4ng.\n{output}",
+        )
+
+
+    def build_page_list(self):
 
         if self.doc is None:
             return
 
-        if self.current_page in self.edited_pages:
+        self.pageList.blockSignals(True)
+        self.pageList.clear()
 
+        for page_index in range(self.doc.page_count):
+            item = QListWidgetItem(
+                QIcon(self.page_thumbnail(page_index)),
+                self.page_list_label(page_index),
+            )
+            item.setData(Qt.ItemDataRole.UserRole, page_index)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.pageList.addItem(item)
+
+        self.pageList.setCurrentRow(self.current_page)
+        self.pageList.blockSignals(False)
+        self.update_page_selection_status()
+
+
+    def page_thumbnail(self, page_index):
+
+        if page_index in self.edited_pages:
             pix = pil_to_pixmap(
-                render_editable_image(self.edited_pages[self.current_page])
+                render_editable_image(self.edited_pages[page_index])
             )
-
         else:
+            pix = render_page_preview(self.doc, page_index, zoom=0.30)
 
-            pix = render_page_preview(
-                self.doc,
-                self.current_page
-            )
-
-        width = max(1, self.scroll.viewport().width() - 20)
-
-        pix = pix.scaledToWidth(
-            width,
-            Qt.SmoothTransformation
+        return pix.scaled(
+            self.pageList.iconSize(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
 
-        self.preview.setPixmap(pix)
 
-        self.preview.adjustSize()
+    def page_list_label(self, page_index):
+
+        label = f"Trang {page_index + 1}"
+        if page_index in self.edited_pages:
+            label += " (\u0111\u00e3 s\u1eeda)"
+        return label
+
+
+    def refresh_page_list_item(self, page_index):
+
+        item = self.pageList.item(page_index)
+        if item is None:
+            return
+
+        item.setText(self.page_list_label(page_index))
+        item.setIcon(QIcon(self.page_thumbnail(page_index)))
+
+
+    def checked_page_indices(self):
+
+        return [
+            page_index
+            for page_index in range(self.pageList.count())
+            if self.pageList.item(page_index).checkState() == Qt.CheckState.Checked
+        ]
+
+
+    def set_all_pages_checked(self, checked):
+
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.pageList.blockSignals(True)
+        for page_index in range(self.pageList.count()):
+            self.pageList.item(page_index).setCheckState(state)
+        self.pageList.blockSignals(False)
+        self.update_page_selection_status()
+
+
+    def update_page_selection_status(self):
+
+        if self.doc is None:
+            return
+
+        selected_count = len(self.checked_page_indices())
+        self.btnEditPage.setEnabled(True)
+
+        summary = (
+            f"{self.doc.page_count} trang | "
+            f"Trang \u0111ang ch\u1ecdn: {self.current_page + 1}"
+        )
+
+        if selected_count:
+            self.pageSummary.setText(f"{summary} | \u0110\u00e3 t\u00edch: {selected_count}")
+            self.btnEditPage.setText(
+                f"CH\u1ec8NH S\u1eecA {selected_count} TRANG \u0110\u00c3 T\u00cdCH"
+            )
+            self.editStatus.setText(
+                "Thao t\u00e1c h\u00e0ng lo\u1ea1t \u00e1p d\u1ee5ng cho c\u00e1c trang \u0111\u00e3 t\u00edch; m\u1ed7i trang v\u1eabn l\u01b0u ri\u00eang."
+            )
+        else:
+            self.pageSummary.setText(summary)
+            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA TRANG \u0110ANG CH\u1eccN")
+            self.editStatus.setText(
+                "T\u00edch \u00f4 trong danh s\u00e1ch trang \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang c\u00f9ng l\u00fac."
+            )
+
+
+    def select_page_from_list(self):
+
+        item = self.pageList.currentItem()
+        if item is None:
+            return
+
+        page_index = item.data(Qt.ItemDataRole.UserRole)
+        if page_index is not None and page_index != self.current_page:
+            self.set_current_page(page_index)
+
+
+    def update_preview(self):
+
+        if self.doc is None:
+            return
 
         self.update_page_status()
 
@@ -449,11 +669,7 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        edited = " • đã chỉnh sửa" if self.current_page in self.edited_pages else ""
-
-        self.lblCurrent.setText(
-            f"Trang {self.current_page+1}/{self.doc.page_count}{edited}"
-        )
+        self.update_page_selection_status()
 
 
     def select_page_from_control(self, page_number):
@@ -473,17 +689,10 @@ class MainWindow(QMainWindow):
 
         self.current_page = page_index
 
-        self.pageSlider.blockSignals(True)
-
-        self.pageSpin.blockSignals(True)
-
-        self.pageSlider.setValue(page_index + 1)
-
-        self.pageSpin.setValue(page_index + 1)
-
-        self.pageSlider.blockSignals(False)
-
-        self.pageSpin.blockSignals(False)
+        if self.pageList.count():
+            self.pageList.blockSignals(True)
+            self.pageList.setCurrentRow(page_index)
+            self.pageList.blockSignals(False)
 
         self.update_preview()
 
@@ -507,21 +716,26 @@ class MainWindow(QMainWindow):
             self.set_current_page(self.current_page - 1)
 
 
-    def current_page_model(self):
+    def page_model(self, page_index):
 
-        existing = self.edited_pages.get(self.current_page)
+        existing = self.edited_pages.get(page_index)
 
         if existing is not None:
 
             return existing
 
-        image = render_page_image(self.doc, self.current_page)
+        image = render_page_image(self.doc, page_index)
 
         return EditableImage(
-            f"Trang {self.current_page+1}",
+            f"Trang {page_index + 1}",
             image.copy(),
             image.copy()
         )
+
+
+    def current_page_model(self):
+
+        return self.page_model(self.current_page)
 
 
     def edit_current_page(self):
@@ -529,35 +743,37 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
 
-        source = self.current_page_model()
+        page_indices = self.checked_page_indices() or [self.current_page]
+        working_pages = []
 
-        # Mo ban sao lam viec: dong hop thoai Huy se khong anh huong trang goc.
-        working = EditableImage(
-            source.path,
-            source.image.copy(),
-            source.original.copy(),
-            copy.deepcopy(source.annotations)
-        )
+        for page_index in page_indices:
+            source = self.page_model(page_index)
+            # Mo ban sao lam viec: dong hop thoai Huy se khong anh huong trang goc.
+            working_pages.append(
+                EditableImage(
+                    source.path,
+                    source.image.copy(),
+                    source.original.copy(),
+                    copy.deepcopy(source.annotations)
+                )
+            )
 
         dialog = ImageToPdfDialog(
             self,
-            [working],
+            working_pages,
             page_edit_mode=True
         )
 
         if dialog.exec():
 
-            updated = dialog.images[0]
+            for page_index, updated in zip(page_indices, dialog.images):
+                if self.page_model_is_original(updated):
+                    self.edited_pages.pop(page_index, None)
+                else:
+                    self.edited_pages[page_index] = updated
+                self.refresh_page_list_item(page_index)
 
-            if self.page_model_is_original(updated):
-
-                self.edited_pages.pop(self.current_page, None)
-
-            else:
-
-                self.edited_pages[self.current_page] = updated
-
-
+            self.update_page_selection_status()
             self.update_preview()
 
 

@@ -207,10 +207,16 @@ class ImageToPdfDialog(QDialog):
         self._populate_initial_images()
 
     def _populate_initial_images(self) -> None:
-        for model in self.images:
-            self.image_list.addItem(QListWidgetItem(os.path.basename(model.path)))
+        for index, model in enumerate(self.images):
+            self.image_list.addItem(QListWidgetItem(self.image_list_label(index, model)))
         if self.images:
+            self.image_list.blockSignals(True)
             self.image_list.setCurrentRow(0)
+            if self.page_edit_mode and len(self.images) > 1:
+                for row in range(len(self.images)):
+                    self.image_list.item(row).setSelected(True)
+            self.image_list.blockSignals(False)
+            self.select_image(0)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -231,9 +237,22 @@ class ImageToPdfDialog(QDialog):
 
         self.image_list = QListWidget()
         self.image_list.setMinimumWidth(250)
-        self.image_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.image_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+            if self.page_edit_mode
+            else QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.image_list.currentRowChanged.connect(self.select_image)
+        self.image_list.itemSelectionChanged.connect(self.update_preview)
         left.addWidget(self.image_list, 1)
+
+        if self.page_edit_mode:
+            batch_hint = QLabel(
+                "Chon mot trang de xem rieng. Giu Ctrl/Shift de chon nhieu "
+                "trang khi xoay, lat, lam ro hoac den trang."
+            )
+            batch_hint.setWordWrap(True)
+            left.addWidget(batch_hint)
 
         list_buttons = QHBoxLayout()
         add = QPushButton("Them anh")
@@ -329,6 +348,36 @@ class ImageToPdfDialog(QDialog):
             return self.images[self.current_index]
         return None
 
+    def selected_images(self) -> list[EditableImage]:
+        """Tra ve cac trang duoc chon de xu ly hang loat trong che do PDF."""
+        if self.page_edit_mode:
+            rows = sorted({self.image_list.row(item) for item in self.image_list.selectedItems()})
+            if rows:
+                return [self.images[row] for row in rows]
+
+        model = self.current_image()
+        return [model] if model is not None else []
+
+    def image_list_label(self, index: int, model: EditableImage) -> str:
+        label = os.path.basename(model.path) or f"Trang {index + 1}"
+        if not self.model_is_original(model):
+            label += " (\u0111\u00e3 s\u1eeda)"
+        return label
+
+    def model_is_original(self, model: EditableImage) -> bool:
+        return (
+            not model.annotations
+            and model.image.mode == model.original.mode
+            and model.image.size == model.original.size
+            and model.image.tobytes() == model.original.tobytes()
+        )
+
+    def refresh_image_list_labels(self) -> None:
+        for row, model in enumerate(self.images):
+            item = self.image_list.item(row)
+            if item is not None:
+                item.setText(self.image_list_label(row, model))
+
     def add_images(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Chon anh", "", IMAGE_FILTER)
         if not paths:
@@ -387,21 +436,25 @@ class ImageToPdfDialog(QDialog):
             model.history.pop(0)
 
     def undo_current(self) -> None:
-        model = self.current_image()
-        if model is None or not model.history:
+        models = [model for model in self.selected_images() if model.history]
+        if not models:
             return
-        model.image, model.annotations = model.history.pop()
+        for model in models:
+            model.image, model.annotations = model.history.pop()
         self.pending_crop = None
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def reset_current(self) -> None:
-        model = self.current_image()
-        if model is None:
+        models = self.selected_images()
+        if not models:
             return
-        self.save_history(model)
-        model.image = model.original.copy()
-        model.annotations.clear()
+        for model in models:
+            self.save_history(model)
+            model.image = model.original.copy()
+            model.annotations.clear()
         self.pending_crop = None
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def flatten_annotations(self, model: EditableImage) -> None:
@@ -411,21 +464,25 @@ class ImageToPdfDialog(QDialog):
         model.annotations.clear()
 
     def rotate_current(self, angle: int) -> None:
-        model = self.current_image()
-        if model is None:
+        models = self.selected_images()
+        if not models:
             return
-        self.save_history(model)
-        self.flatten_annotations(model)
-        model.image = model.image.rotate(angle, expand=True)
+        for model in models:
+            self.save_history(model)
+            self.flatten_annotations(model)
+            model.image = model.image.rotate(angle, expand=True)
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def flip_current(self, operation: Image.Transpose) -> None:
-        model = self.current_image()
-        if model is None:
+        models = self.selected_images()
+        if not models:
             return
-        self.save_history(model)
-        self.flatten_annotations(model)
-        model.image = model.image.transpose(operation)
+        for model in models:
+            self.save_history(model)
+            self.flatten_annotations(model)
+            model.image = model.image.transpose(operation)
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def start_crop(self) -> None:
@@ -434,7 +491,15 @@ class ImageToPdfDialog(QDialog):
         self.pending_crop = None
         self.preview.clear_crop_rectangle()
         self.preview.begin_crop()
-        self.status_label.setText("Keo chuot tren anh de chon vung can cat, sau do bam 'Ap dung cat'.")
+        suffix = (
+            " Cat chi ap dung cho trang dang xem."
+            if len(self.selected_images()) > 1
+            else ""
+        )
+        self.status_label.setText(
+            "Keo chuot tren anh de chon vung can cat, sau do bam 'Ap dung cat'."
+            + suffix
+        )
 
     def set_crop_selection(self, rect: QRectF) -> None:
         model = self.current_image()
@@ -462,6 +527,7 @@ class ImageToPdfDialog(QDialog):
         model.image = model.image.crop((left, top, right, bottom))
         self.pending_crop = None
         self.preview.clear_crop_rectangle()
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def cancel_crop(self) -> None:
@@ -471,26 +537,32 @@ class ImageToPdfDialog(QDialog):
         self.status_label.setText("Da huy thao tac cat anh.")
 
     def enhance_document(self) -> None:
-        model = self.current_image()
-        if model is None:
+        models = self.selected_images()
+        if not models:
             return
-        self.save_history(model)
-        # Tang tuong phan, tu dong can bang sang va lam net nhu che do scan tai lieu.
-        rgb = model.image.convert("RGB")
-        rgb = ImageOps.autocontrast(rgb, cutoff=1)
-        rgb = ImageEnhance.Contrast(rgb).enhance(1.3)
-        rgb = ImageEnhance.Sharpness(rgb).enhance(1.6)
-        model.image = rgb.convert("RGBA")
+        for model in models:
+            self.save_history(model)
+            # Tang tuong phan, tu dong can bang sang va lam net nhu che do scan tai lieu.
+            rgb = model.image.convert("RGB")
+            rgb = ImageOps.autocontrast(rgb, cutoff=1)
+            rgb = ImageEnhance.Contrast(rgb).enhance(1.3)
+            rgb = ImageEnhance.Sharpness(rgb).enhance(1.6)
+            model.image = rgb.convert("RGBA")
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def make_black_white(self) -> None:
-        model = self.current_image()
-        if model is None:
+        models = self.selected_images()
+        if not models:
             return
-        self.save_history(model)
-        grayscale = ImageOps.autocontrast(model.image.convert("L"), cutoff=1)
-        threshold = 165
-        model.image = grayscale.point(lambda pixel: 255 if pixel >= threshold else 0).convert("RGBA")
+        for model in models:
+            self.save_history(model)
+            grayscale = ImageOps.autocontrast(model.image.convert("L"), cutoff=1)
+            threshold = 165
+            model.image = grayscale.point(
+                lambda pixel: 255 if pixel >= threshold else 0
+            ).convert("RGBA")
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def start_add_text(self) -> None:
@@ -511,7 +583,12 @@ class ImageToPdfDialog(QDialog):
             (color.red(), color.green(), color.blue()),
         )
         self.preview.begin_text()
-        self.status_label.setText("Bam vao anh de dat vi tri chen chu.")
+        suffix = (
+            " Chu chi duoc chen vao trang dang xem."
+            if len(self.selected_images()) > 1
+            else ""
+        )
+        self.status_label.setText("Bam vao anh de dat vi tri chen chu." + suffix)
 
     def place_text(self, point: QPointF) -> None:
         model = self.current_image()
@@ -535,14 +612,17 @@ class ImageToPdfDialog(QDialog):
         )
         self.pending_text = None
         self.status_label.setText("Da chen chu. Ban co the them chu khac hoac tiep tuc chinh sua.")
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def remove_last_text(self) -> None:
-        model = self.current_image()
-        if model is None or not model.annotations:
+        models = [model for model in self.selected_images() if model.annotations]
+        if not models:
             return
-        self.save_history(model)
-        model.annotations.pop()
+        for model in models:
+            self.save_history(model)
+            model.annotations.pop()
+        self.refresh_image_list_labels()
         self.update_preview()
 
     def update_preview(self) -> None:
@@ -567,8 +647,15 @@ class ImageToPdfDialog(QDialog):
 
         self.scene.setSceneRect(0, 0, model.image.width, model.image.height)
         self.preview.fit_image()
+        selected_count = len(self.selected_images())
+        batch_status = (
+            f" | ap dung hang loat: {selected_count} trang"
+            if self.page_edit_mode and selected_count > 1
+            else ""
+        )
         self.status_label.setText(
             f"{os.path.basename(model.path)}  |  {model.image.width} x {model.image.height} px"
+            f"{batch_status}"
         )
 
     def build_export_image(self, model: EditableImage) -> Image.Image:
