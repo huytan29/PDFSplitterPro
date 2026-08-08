@@ -46,6 +46,9 @@ class MainWindow(QMainWindow):
         self.edited_pages = {}
         self.checked_pages = set()
         self._thumbnail_cache = {}
+        # This is the interface language.  OCR language remains independent
+        # when the user chooses the automatic OCR option.
+        self.ui_language = "vi"
 
         self.initUI()
 
@@ -86,15 +89,15 @@ class MainWindow(QMainWindow):
 
         image_tools = QHBoxLayout()
 
-        btnImageToPdf = QPushButton("ẢNH → PDF")
+        self.btnImageToPdf = QPushButton("ẢNH → PDF")
 
-        btnImageToPdf.setMinimumHeight(38)
+        self.btnImageToPdf.setMinimumHeight(38)
 
-        btnImageToPdf.clicked.connect(self.open_image_to_pdf)
+        self.btnImageToPdf.clicked.connect(self.open_image_to_pdf)
 
         image_tools.addStretch()
 
-        image_tools.addWidget(btnImageToPdf)
+        image_tools.addWidget(self.btnImageToPdf)
 
         layout.addLayout(image_tools)
 
@@ -102,19 +105,20 @@ class MainWindow(QMainWindow):
         # FILE PDF
         #=========================
 
-        groupFile=QGroupBox("PDF nguồn")
-        layout.addWidget(groupFile)
+        self.groupFile=QGroupBox("PDF nguồn")
+        self.groupFile.setMaximumHeight(70)
+        layout.addWidget(self.groupFile)
 
-        h1=QHBoxLayout(groupFile)
+        h1=QHBoxLayout(self.groupFile)
 
         self.txtPdf=QLineEdit()
 
-        btnOpen=QPushButton("Chọn")
+        self.btnOpen=QPushButton("Chọn")
 
-        btnOpen.clicked.connect(self.open_pdf)
+        self.btnOpen.clicked.connect(self.open_pdf)
 
         h1.addWidget(self.txtPdf)
-        h1.addWidget(btnOpen)
+        h1.addWidget(self.btnOpen)
 
 
         #=========================
@@ -156,9 +160,9 @@ class MainWindow(QMainWindow):
 
         pageRailHeader = QHBoxLayout()
 
-        pageRailTitle = QLabel("TRANG C\u1ea6N CH\u1ec8NH S\u1eecA")
-        pageRailTitle.setStyleSheet("font-size: 15px; font-weight: 700;")
-        pageRailHeader.addWidget(pageRailTitle)
+        self.pageRailTitle = QLabel("TRANG C\u1ea6N CH\u1ec8NH S\u1eecA")
+        self.pageRailTitle.setStyleSheet("font-size: 15px; font-weight: 700;")
+        pageRailHeader.addWidget(self.pageRailTitle)
         pageRailHeader.addStretch()
 
         self.pageSummary = QLabel("Ch\u01b0a ch\u1ecdn PDF")
@@ -168,15 +172,15 @@ class MainWindow(QMainWindow):
         pageRailHeader.addWidget(self.pageSummary)
         pageRailLayout.addLayout(pageRailHeader)
 
-        pageRailHint = QLabel(
+        self.pageRailHint = QLabel(
             "T\u00edch \u00f4 \u0111\u1ec3 ch\u1ec9nh s\u1eeda nhi\u1ec1u trang; b\u1ea5m th\u1ebb \u0111\u1ec3 ch\u1ecdn trang ri\u00eang."
         )
-        pageRailHint.setText(
+        self.pageRailHint.setText(
             "B\u1ea5m th\u1ebb trang \u0111\u1ec3 ch\u1ecdn ho\u1eb7c b\u1ecf ch\u1ecdn; d\u1ea5u \u2713 xanh hi\u1ec3n th\u1ecb ngay tr\u00ean \u1ea3nh."
         )
-        pageRailHint.setWordWrap(True)
-        pageRailHint.setStyleSheet("color: #9ab6ca;")
-        pageRailLayout.addWidget(pageRailHint)
+        self.pageRailHint.setWordWrap(True)
+        self.pageRailHint.setStyleSheet("color: #9ab6ca;")
+        pageRailLayout.addWidget(self.pageRailHint)
 
         self.pageList = QListWidget()
         self.pageList.setIconSize(QSize(120, 140))
@@ -284,6 +288,45 @@ class MainWindow(QMainWindow):
         )
         self.btnAutoFix.clicked.connect(self.auto_correct_pages)
 
+        self.autoOcrLanguage = QComboBox()
+        self.autoOcrLanguage.addItem("Tự động", None)
+        self.autoOcrLanguage.addItem("Tiếng Việt", "vie")
+        self.autoOcrLanguage.addItem("English", "eng")
+        self.autoOcrLanguage.setEnabled(True)
+        self.autoOcrLanguage.setMinimumHeight(38)
+        self.autoOcrLanguage.setMinimumWidth(106)
+        self.autoOcrLanguage.setMaximumWidth(118)
+        self.autoOcrLanguage.currentIndexChanged.connect(
+            self.on_ocr_language_changed
+        )
+        self.autoOcrLanguage.setToolTip(
+            "Chọn ngôn ngữ OCR cho TỰ SỬA: Tự động dùng cả tiếng Việt và English."
+        )
+        self.autoOcrLanguage.setStyleSheet("""
+            QComboBox {
+                background: #262626;
+                border: 1px solid #4b4b4b;
+                border-radius: 7px;
+                color: #d8e7ee;
+                padding: 0 8px;
+            }
+            QComboBox:hover { border-color: #4ca3cc; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox QAbstractItemView {
+                background: #292929;
+                border: 1px solid #4b4b4b;
+                color: #ffffff;
+                selection-background-color: #245069;
+            }
+        """)
+
+        self.autoOcrLabel = QLabel("OCR")
+        self.autoOcrLabel.setStyleSheet("color: #9ab6ca; font-weight: 600;")
+        # Place the global OCR setting in the top toolbar, immediately before
+        # the image-to-PDF action, rather than mixing it with page actions.
+        image_tools.insertWidget(1, self.autoOcrLabel)
+        image_tools.insertWidget(2, self.autoOcrLanguage)
+
 
         self.editStatus = QLabel(
             "Thay doi se duoc ap dung khi bam TACH PDF; PDF goc khong bi ghi de."
@@ -308,32 +351,33 @@ class MainWindow(QMainWindow):
         # SAVE
         #=========================
 
-        groupSave=QGroupBox("Thư mục lưu")
+        self.groupSave=QGroupBox("Thư mục lưu")
+        self.groupSave.setMaximumHeight(70)
 
-        layout.addWidget(groupSave)
+        layout.addWidget(self.groupSave)
 
-        h2=QHBoxLayout(groupSave)
+        h2=QHBoxLayout(self.groupSave)
 
         self.txtSave=QLineEdit()
 
-        btnSave=QPushButton("Chọn")
+        self.btnSave=QPushButton("Chọn")
 
-        btnSave.clicked.connect(self.choose_folder)
+        self.btnSave.clicked.connect(self.choose_folder)
 
         h2.addWidget(self.txtSave)
 
-        h2.addWidget(btnSave)
+        h2.addWidget(self.btnSave)
 
 
         #=========================
         # RANGE
         #=========================
 
-        groupRange=QGroupBox("Khoảng trang")
+        self.groupRange=QGroupBox("Khoảng trang")
 
-        groupRange.setMaximumHeight(82)
+        self.groupRange.setMaximumHeight(82)
 
-        v=QVBoxLayout(groupRange)
+        v=QVBoxLayout(self.groupRange)
 
         self.txtRange=QPlainTextEdit()
 
@@ -359,11 +403,11 @@ class MainWindow(QMainWindow):
         # MERGE SELECTED PAGES
         #=========================
 
-        groupMerge=QGroupBox("GH\u00c9P TRANG TH\u00c0NH 1 PDF")
+        self.groupMerge=QGroupBox("GH\u00c9P TRANG TH\u00c0NH 1 PDF")
 
-        groupMerge.setMaximumHeight(70)
+        self.groupMerge.setMaximumHeight(70)
 
-        mergeLayout=QHBoxLayout(groupMerge)
+        mergeLayout=QHBoxLayout(self.groupMerge)
 
         self.txtMergePages=QLineEdit()
 
@@ -389,8 +433,8 @@ class MainWindow(QMainWindow):
         # width, keeping the split action visible without vertical scrolling.
         outputOptions = QHBoxLayout()
         outputOptions.setSpacing(6)
-        outputOptions.addWidget(groupRange, 1)
-        outputOptions.addWidget(groupMerge, 2)
+        outputOptions.addWidget(self.groupRange, 1)
+        outputOptions.addWidget(self.groupMerge, 2)
         layout.addLayout(outputOptions)
 
 
@@ -423,6 +467,89 @@ class MainWindow(QMainWindow):
 
         split_actions.addWidget(self.btnSplit)
         outerLayout.addWidget(splitFooter)
+
+
+    def on_ocr_language_changed(self, _index=None):
+        """Synchronize the visible UI with an explicit OCR language choice.
+
+        The Automatic option intentionally leaves the current UI language in
+        place while OCR continues to check both Vietnamese and English.
+        """
+        selected_language = self.autoOcrLanguage.currentData()
+        if selected_language == "eng":
+            self.set_interface_language("en")
+        elif selected_language == "vie":
+            self.set_interface_language("vi")
+
+
+    def set_interface_language(self, language):
+        """Refresh all persistent labels in the main window."""
+        self.ui_language = "en" if language == "en" else "vi"
+        english = self.ui_language == "en"
+
+        self.autoOcrLanguage.setItemText(0, "Automatic" if english else "Tự động")
+        self.autoOcrLanguage.setItemText(1, "Vietnamese" if english else "Tiếng Việt")
+        self.autoOcrLanguage.setItemText(2, "English")
+        self.autoOcrLanguage.setToolTip(
+            "Choose the OCR language for AUTO FIX. Automatic uses Vietnamese and English."
+            if english
+            else "Chọn ngôn ngữ OCR cho TỰ SỬA: Tự động dùng cả tiếng Việt và English."
+        )
+        self.autoOcrLabel.setText("OCR language" if english else "OCR")
+        self.btnImageToPdf.setText("IMAGE → PDF" if english else "ẢNH → PDF")
+
+        self.groupFile.setTitle("Source PDF" if english else "PDF nguồn")
+        self.btnOpen.setText("Choose" if english else "Chọn")
+
+        self.pageRailTitle.setText("PAGES TO EDIT" if english else "TRANG CẦN CHỈNH SỬA")
+        self.pageRailHint.setText(
+            "Click a page card to select or clear it; the green ✓ appears on the image."
+            if english
+            else "Bấm thẻ trang để chọn hoặc bỏ chọn; dấu ✓ xanh hiển thị ngay trên ảnh."
+        )
+        self.btnSelectAllPages.setText("Select all" if english else "Tích tất cả")
+        self.btnClearPageSelection.setText("Clear selection" if english else "Bỏ chọn")
+        self.btnEditPage.setText("EDIT" if english else "CHỈNH SỬA")
+        self.btnAutoFix.setText("✦ AUTO FIX" if english else "✦ TỰ SỬA")
+        self.btnAutoFix.setToolTip(
+            "Automatically detects 90°/180° rotations and mirrored text on selected pages."
+            if english
+            else "Tự nhận diện xoay 90°/180° và lật gương cho các trang đã tích."
+        )
+
+        self.groupSave.setTitle("Output folder" if english else "Thư mục lưu")
+        self.btnSave.setText("Choose" if english else "Chọn")
+        self.groupRange.setTitle("Page ranges" if english else "Khoảng trang")
+        self.txtRange.setPlaceholderText(
+            "Example\n\n1-10\n11-25\n26-40"
+            if english
+            else "Ví dụ\n\n1-10\n11-25\n26-40"
+        )
+        self.groupMerge.setTitle(
+            "MERGE PAGES INTO ONE PDF" if english else "GHÉP TRANG THÀNH 1 PDF"
+        )
+        self.txtMergePages.setPlaceholderText(
+            "Example: 1,3  |  1-3  |  1,3,5  |  1-3,5,8-10"
+            if english
+            else "Ví dụ: 1,3  |  1-3  |  1,3,5  |  1-3,5,8-10"
+        )
+        self.btnMergePdf.setText(
+            "SELECT AND MERGE PDF" if english else "CHỌN VÀ GHÉP PDF"
+        )
+        self.btnSplit.setText("SPLIT AND SAVE PDF" if english else "TÁCH PDF VÀ LƯU")
+
+        if self.doc is None:
+            self.pageSummary.setText("No PDF selected" if english else "Chưa chọn PDF")
+            self.editStatus.setText(
+                "Changes are applied when you select SPLIT AND SAVE PDF; the original PDF is unchanged."
+                if english
+                else "Thay doi se duoc ap dung khi bam TACH PDF; PDF goc khong bi ghi de."
+            )
+            return
+
+        for page_index in range(self.pageList.count()):
+            self.refresh_page_list_item(page_index)
+        self.update_page_selection_status()
 
 
     def open_image_to_pdf(self):
@@ -480,6 +607,7 @@ class MainWindow(QMainWindow):
         self.btnMergePdf.setEnabled(True)
 
         self.btnAutoFix.setEnabled(True)
+        self.autoOcrLanguage.setEnabled(True)
 
         self.build_page_list()
 
@@ -512,6 +640,7 @@ class MainWindow(QMainWindow):
             return False
 
         ocr_unavailable = False
+        ocr_notice = ""
         try:
             languages = ensure_ocr_available()
         except OcrUnavailableError:
@@ -519,6 +648,20 @@ class MainWindow(QMainWindow):
             # scanned land certificates even when full OCR is unavailable.
             languages = []
             ocr_unavailable = True
+            ocr_notice = "OCR chưa sẵn sàng: chưa kiểm tra lật gương."
+        else:
+            requested_language = self.autoOcrLanguage.currentData()
+            if requested_language:
+                if requested_language in languages:
+                    languages = [requested_language]
+                else:
+                    languages = []
+                    ocr_unavailable = True
+                    language_name = self.autoOcrLanguage.currentText()
+                    ocr_notice = (
+                        f"Không có dữ liệu OCR {language_name}: "
+                        "chưa kiểm tra lật gương."
+                    )
 
         progress = QProgressDialog(
             "Đang phân tích trang bằng OCR...", "Hủy", 0, len(page_indices), self
@@ -571,7 +714,7 @@ class MainWindow(QMainWindow):
 
         if not updates:
             detail = (
-                " OCR chưa sẵn sàng nên không thể kiểm tra lật gương."
+                f" {ocr_notice}"
                 if ocr_unavailable
                 else ""
             )
@@ -600,7 +743,7 @@ class MainWindow(QMainWindow):
         if failed_pages:
             summary.append(f"bỏ qua {len(failed_pages)} trang lỗi OCR")
         if ocr_unavailable:
-            summary.append("OCR chưa sẵn sàng: chưa kiểm tra lật gương")
+            summary.append(ocr_notice)
 
         QMessageBox.information(
             self,
@@ -849,9 +992,13 @@ class MainWindow(QMainWindow):
 
     def page_list_label(self, page_index):
 
-        label = f"Trang {page_index + 1}"
+        label = (
+            f"Page {page_index + 1}"
+            if self.ui_language == "en"
+            else f"Trang {page_index + 1}"
+        )
         if page_index in self.edited_pages:
-            label += " (\u0111\u00e3 s\u1eeda)"
+            label += " (edited)" if self.ui_language == "en" else " (đã sửa)"
         return label
 
 
@@ -912,24 +1059,35 @@ class MainWindow(QMainWindow):
         selected_count = len(self.checked_page_indices())
         self.btnEditPage.setEnabled(True)
 
-        summary = (
-            f"{self.doc.page_count} trang | "
-            f"Trang \u0111ang ch\u1ecdn: {self.current_page + 1}"
-        )
+        if self.ui_language == "en":
+            summary = (
+                f"{self.doc.page_count} pages | "
+                f"Current page: {self.current_page + 1}"
+            )
+        else:
+            summary = (
+                f"{self.doc.page_count} trang | "
+                f"Trang đang chọn: {self.current_page + 1}"
+            )
 
         if selected_count:
-            self.pageSummary.setText(f"{summary} | \u0110\u00e3 t\u00edch: {selected_count}")
-            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA")
-            self.btnAutoFix.setText("✦ TỰ SỬA")
+            selected_label = "Selected" if self.ui_language == "en" else "Đã tích"
+            self.pageSummary.setText(f"{summary} | {selected_label}: {selected_count}")
+            self.btnEditPage.setText("EDIT" if self.ui_language == "en" else "CHỈNH SỬA")
+            self.btnAutoFix.setText("✦ AUTO FIX" if self.ui_language == "en" else "✦ TỰ SỬA")
             self.editStatus.setText(
-                f"Áp dụng cho {selected_count} trang đã tích."
+                f"Applies to {selected_count} selected page(s)."
+                if self.ui_language == "en"
+                else f"Áp dụng cho {selected_count} trang đã tích."
             )
         else:
             self.pageSummary.setText(summary)
-            self.btnEditPage.setText("CH\u1ec8NH S\u1eecA")
-            self.btnAutoFix.setText("✦ TỰ SỬA")
+            self.btnEditPage.setText("EDIT" if self.ui_language == "en" else "CHỈNH SỬA")
+            self.btnAutoFix.setText("✦ AUTO FIX" if self.ui_language == "en" else "✦ TỰ SỬA")
             self.editStatus.setText(
-                f"Áp dụng cho trang {self.current_page + 1}."
+                f"Applies to page {self.current_page + 1}."
+                if self.ui_language == "en"
+                else f"Áp dụng cho trang {self.current_page + 1}."
             )
 
 
