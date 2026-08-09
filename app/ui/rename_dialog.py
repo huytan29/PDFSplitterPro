@@ -19,7 +19,9 @@ class RenameDialog(QDialog):
                  end,
                  parent=None,
                  edited_pages=None,
-                 page_order=None):
+                 page_order=None,
+                 suggested_filename="",
+                 suggestion_note=""):
 
         super().__init__(parent)
 
@@ -173,8 +175,24 @@ class RenameDialog(QDialog):
         layout.addWidget(QLabel("Tên file"))
 
         self.edit = QLineEdit()
+        self.edit.setText(suggested_filename)
 
         layout.addWidget(self.edit)
+
+        self.autoNameNote = QLabel(suggestion_note)
+        self.autoNameNote.setWordWrap(True)
+        if suggested_filename:
+            self.autoNameNote.setStyleSheet(
+                "background: #173b2d; border: 1px solid #2e9e70; "
+                "border-radius: 5px; color: #c9ffe8; padding: 6px 9px;"
+            )
+        else:
+            self.autoNameNote.setStyleSheet(
+                "background: #41351c; border: 1px solid #a77d28; "
+                "border-radius: 5px; color: #ffe7ac; padding: 6px 9px;"
+            )
+        self.autoNameNote.setVisible(bool(suggestion_note))
+        layout.addWidget(self.autoNameNote)
 
         buttons = QHBoxLayout()
 

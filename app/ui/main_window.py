@@ -18,6 +18,7 @@ from app.services.auto_correct import (
     auto_correct_document,
     ensure_ocr_available,
 )
+from app.services.auto_naming import suggest_document_filename
 from app.services.preview import render_page_image, render_page_preview
 from app.services.splitter import (
     merge_pdf_with_edits,
@@ -562,6 +563,13 @@ class MainWindow(QMainWindow):
         split_actions.setContentsMargins(8, 3, 8, 3)
         split_actions.setSpacing(8)
 
+        self.btnAutoName = QPushButton()
+        self.btnAutoName.setCheckable(True)
+        self.btnAutoName.setChecked(False)
+        self.btnAutoName.setFixedHeight(38)
+        self.btnAutoName.setMinimumWidth(190)
+        self.btnAutoName.toggled.connect(self.update_auto_name_button)
+
         self.btnSplit=QPushButton("TÁCH PDF VÀ LƯU")
         self.btnSplit.setFixedHeight(38)
         self.btnSplit.setStyleSheet("""
@@ -575,7 +583,9 @@ class MainWindow(QMainWindow):
         """)
         self.btnSplit.clicked.connect(self.do_split)
 
-        split_actions.addWidget(self.btnSplit)
+        self.update_auto_name_button(False)
+        split_actions.addWidget(self.btnAutoName)
+        split_actions.addWidget(self.btnSplit, 1)
         outerLayout.addWidget(splitFooter)
 
 
@@ -590,6 +600,49 @@ class MainWindow(QMainWindow):
             self.set_interface_language("en")
         elif selected_language == "vie":
             self.set_interface_language("vi")
+
+
+    def update_auto_name_button(self, checked):
+        english = self.ui_language == "en"
+        if checked:
+            self.btnAutoName.setText(
+                "AUTO NAME: ON" if english else "TỰ ĐẶT TÊN: BẬT"
+            )
+            self.btnAutoName.setStyleSheet("""
+                QPushButton {
+                    background: #16533d;
+                    border: 1px solid #38d194;
+                    border-radius: 7px;
+                    color: #e0fff1;
+                    font-weight: 700;
+                }
+                QPushButton:hover { background: #1d6b4e; }
+            """)
+        else:
+            self.btnAutoName.setText(
+                "AUTO NAME: OFF" if english else "TỰ ĐẶT TÊN: TẮT"
+            )
+            self.btnAutoName.setStyleSheet("""
+                QPushButton {
+                    background: #303030;
+                    border: 1px solid #606060;
+                    border-radius: 7px;
+                    color: #e0e0e0;
+                    font-weight: 700;
+                }
+                QPushButton:hover { background: #3b3b3b; }
+            """)
+        self.btnAutoName.setToolTip(
+            (
+                "OCR will suggest GCN/CMND/CCCD filenames when splitting. "
+                "You can review each name before saving."
+            )
+            if english
+            else (
+                "Khi bật, OCR sẽ gợi ý tên GCN/CMND/CCCD lúc tách PDF. "
+                "Bạn vẫn có thể kiểm tra và sửa tên trước khi lưu."
+            )
+        )
 
 
     def set_interface_language(self, language):
@@ -649,6 +702,7 @@ class MainWindow(QMainWindow):
             "SELECT AND MERGE PDF" if english else "CHỌN VÀ GHÉP PDF"
         )
         self.btnSplit.setText("SPLIT AND SAVE PDF" if english else "TÁCH PDF VÀ LƯU")
+        self.update_auto_name_button(self.btnAutoName.isChecked())
 
         if self.doc is None:
             self.pageSummary.setText("No PDF selected" if english else "Chưa chọn PDF")
@@ -872,6 +926,68 @@ class MainWindow(QMainWindow):
         return True
 
 
+    def suggest_split_filenames(self, ranges):
+        """OCR the first pages in each range and return reviewable suggestions."""
+        try:
+            languages = ensure_ocr_available()
+        except OcrUnavailableError as error:
+            QMessageBox.critical(
+                self,
+                "OCR chưa sẵn sàng",
+                "Không thể tự đặt tên vì bộ OCR chưa sẵn sàng.\n" + str(error),
+            )
+            return None
+
+        progress = QProgressDialog(
+            "Đang nhận dạng tên tài liệu...",
+            "Hủy",
+            0,
+            len(ranges),
+            self,
+        )
+        progress.setWindowTitle("Tự động đặt tên")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(250)
+        progress.setAutoClose(False)
+
+        suggestions = []
+        for position, (start, end) in enumerate(ranges, start=1):
+            progress.setValue(position - 1)
+            progress.setLabelText(
+                f"Đang đọc khoảng {start}-{end} ({position}/{len(ranges)})..."
+            )
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                progress.close()
+                return None
+
+            images = []
+            for visible_position in range(start - 1, min(end, start + 1)):
+                page_index = self.page_order[visible_position]
+                model = self.page_model(page_index)
+                image = (
+                    render_editable_image(model)
+                    if model.annotations
+                    else model.image.copy()
+                )
+                images.append(image)
+
+            try:
+                suggestion = suggest_document_filename(
+                    images,
+                    languages,
+                    source_path=self.pdf_path,
+                    range_start=start,
+                )
+            except Exception:
+                suggestion = None
+            suggestions.append(suggestion)
+
+        progress.setValue(len(ranges))
+        progress.close()
+        return suggestions
+
+
     def do_split(self):
 
         if self.doc is None:
@@ -896,15 +1012,34 @@ class MainWindow(QMainWindow):
 
         ranges=[]
 
-        for line in text.splitlines():
+        try:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.count("-") != 1:
+                    raise ValueError(f"Khoảng trang không hợp lệ: {line}")
 
-            if "-" not in line:
+                a, b = (part.strip() for part in line.split("-"))
+                start, end = int(a), int(b)
+                if start < 1 or start > end or end > self.doc.page_count:
+                    raise ValueError(
+                        f"Khoảng {line} phải nằm trong PDF 1-{self.doc.page_count}."
+                    )
+                ranges.append((start, end))
+        except ValueError as error:
+            QMessageBox.warning(self, "Lỗi khoảng trang", str(error))
+            return
 
-                continue
+        if not ranges:
+            QMessageBox.warning(self, "Lỗi", "Chưa có khoảng trang hợp lệ.")
+            return
 
-            a,b=line.split("-")
-
-            ranges.append((int(a),int(b)))
+        suggestions = [None] * len(ranges)
+        if self.btnAutoName.isChecked():
+            suggestions = self.suggest_split_filenames(ranges)
+            if suggestions is None:
+                return
 
 
 
@@ -912,7 +1047,20 @@ class MainWindow(QMainWindow):
 
         rotations = []
 
-        for start,end in ranges:
+        for range_index, (start, end) in enumerate(ranges):
+
+            suggestion = suggestions[range_index]
+            suggested_filename = suggestion.filename if suggestion else ""
+            suggestion_note = ""
+            if self.btnAutoName.isChecked():
+                suggestion_note = (
+                    suggestion.detail
+                    if suggestion
+                    else (
+                        "Không nhận dạng chắc chắn GCN, CMND hoặc CCCD trong khoảng này. "
+                        "Vui lòng nhập tên thủ công."
+                    )
+                )
 
             dlg=RenameDialog(
                 self.doc,
@@ -921,6 +1069,8 @@ class MainWindow(QMainWindow):
                 self,
                 edited_pages=self.edited_pages,
                 page_order=self.page_order,
+                suggested_filename=suggested_filename,
+                suggestion_note=suggestion_note,
             )
 
             if dlg.exec():
