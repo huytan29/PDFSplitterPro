@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -500,92 +501,354 @@ def _detect_cmnd(
 
 def _gcn_candidate(text: str) -> str | None:
     compact = re.sub(r"[^A-Z0-9]+", " ", text.upper())
-    match = re.search(r"(?<![A-Z0-9])([A-Z]{2})\s*([0-9]{5,9})(?![0-9])", compact)
+    match = re.search(r"(?<![A-Z0-9])([A-Z]{2})\s*([0-9]{4,9})(?![0-9])", compact)
     if match:
         return f"{match.group(1)} {match.group(2)}"
 
     no_spaces = re.sub(r"[^A-Z0-9]", "", text.upper())
-    match = re.search(r"([A-Z]{2})([0-9]{5,9})", no_spaces)
+    match = re.search(r"([A-Z]{2})([0-9]{4,9})", no_spaces)
     return f"{match.group(1)} {match.group(2)}" if match else None
 
 
-def _correct_publication_number(
+def _publication_parts(publication_number: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"([A-Z]{2})\s*([0-9]{4,9})", publication_number.upper())
+    return (match.group(1), match.group(2)) if match else None
+
+
+def _select_publication_number(
+    candidates: list[str],
+    reference_codes: list[str],
+    preferred_reference: str | None = None,
+) -> str | None:
+    """Choose a code from OCR evidence without treating a folder name as truth."""
+    parsed_candidates = [
+        (candidate, parts[0], parts[1])
+        for candidate in candidates
+        if (parts := _publication_parts(candidate)) is not None
+    ]
+    if not parsed_candidates:
+        return None
+
+    counts = Counter(candidate for candidate, _, _ in parsed_candidates)
+
+    # A source filename is only a review hint.  Accept it when OCR independently
+    # sees the complete code, or when the scan visibly cuts off exactly one final
+    # digit and only one reference can complete that prefix.  Never substitute a
+    # merely "similar" code: real folders can contain stale or incorrect codes.
+    supported_references: list[tuple[int, str]] = []
+    for reference in reference_codes:
+        parts = _publication_parts(reference)
+        if parts is None:
+            continue
+        reference_letters, reference_digits = parts
+        exact_votes = counts.get(f"{reference_letters} {reference_digits}", 0)
+        prefix_votes = sum(
+            counts[candidate]
+            for candidate, letters, digits in set(parsed_candidates)
+            if letters == reference_letters
+            and 1 <= len(reference_digits) - len(digits) <= (
+                2 if reference == preferred_reference else 1
+            )
+            and reference_digits.startswith(digits)
+        )
+        letter_confusion_votes = sum(
+            counts[candidate]
+            for candidate, letters, digits in set(parsed_candidates)
+            if digits == reference_digits
+            and _edit_distance(letters, reference_letters) == 1
+        )
+        if exact_votes or prefix_votes or letter_confusion_votes:
+            supported_references.append(
+                (
+                    exact_votes + prefix_votes + letter_confusion_votes,
+                    f"{reference_letters} {reference_digits}",
+                )
+            )
+    if supported_references:
+        supported_references.sort(reverse=True)
+        best_score = supported_references[0][0]
+        best_references = [
+            reference
+            for score, reference in supported_references
+            if score == best_score
+        ]
+        if preferred_reference in best_references:
+            return preferred_reference
+        if len(best_references) == 1:
+            return best_references[0]
+
+    # Reconcile split evidence such as BO 832371 (complete digits) and
+    # BQ 83237 (correct letters but a clipped last digit).  The combined result
+    # is accepted only when one two-letter prefix has strictly stronger support.
+    composite_counts: Counter[str] = Counter()
+    for _, full_letters, full_digits in set(parsed_candidates):
+        if len(full_digits) not in {6, 8}:
+            continue
+        letter_votes: Counter[str] = Counter()
+        for candidate, letters, digits in set(parsed_candidates):
+            if _edit_distance(letters, full_letters) > 1:
+                continue
+            if digits == full_digits or (
+                len(full_digits) == len(digits) + 1 and full_digits.startswith(digits)
+            ):
+                letter_votes[letters] += counts[candidate]
+        if not letter_votes:
+            continue
+        ranked_letters = letter_votes.most_common()
+        if len(ranked_letters) == 1 or ranked_letters[0][1] > ranked_letters[1][1]:
+            letters, votes = ranked_letters[0]
+            composite_counts[f"{letters} {full_digits}"] += votes
+
+    if composite_counts:
+        ranked_composites = composite_counts.most_common()
+        if (
+            len(ranked_composites) == 1
+            or ranked_composites[0][1] > ranked_composites[1][1]
+        ):
+            return ranked_composites[0][0]
+
+    # Six digits are the normal publication series; some older series use
+    # eight. Five, seven, or nine digits are usually a clipped/duplicated glyph,
+    # so leave an ambiguous suggestion editable instead of naming it wrongly.
+    plausible = Counter(
+        candidate
+        for candidate, _, digits in parsed_candidates
+        if len(digits) in {6, 8}
+    )
+    if not plausible:
+        return None
+    ranked = plausible.most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        top_votes = ranked[0][1]
+        tied = [candidate for candidate, votes in ranked if votes == top_votes]
+        reference_letters = {
+            parts[0]
+            for reference in reference_codes
+            if (parts := _publication_parts(reference)) is not None
+        }
+        family_matches = [
+            candidate
+            for candidate in tied
+            if _publication_parts(candidate)[0] in reference_letters
+        ]
+        if len(family_matches) == 1:
+            return family_matches[0]
+        return None
+    return ranked[0][0]
+
+
+def _is_gcn_cover(image: Image.Image) -> bool:
+    title_crop = _prepare_color(_relative_crop(image, (0.22, 0.04, 0.98, 0.68)))
+    title_text = _search_text(_ocr(title_crop, "vie", 11))
+    return "GIAY CHUNG NHAN" in title_text or "QUYEN SU DUNG" in title_text
+
+
+def _gcn_code_is_strong_without_title(
+    publication_number: str,
+    candidates: list[str],
+    reference_codes: list[str],
+) -> bool:
+    counts = Counter(candidates)
+    votes = counts.get(publication_number, 0)
+    if votes >= 3:
+        return True
+    if publication_number not in reference_codes:
+        return False
+
+    selected_parts = _publication_parts(publication_number)
+    if selected_parts is None:
+        return False
+    selected_letters, selected_digits = selected_parts
+    supporting_votes = 0
+    for candidate, candidate_votes in counts.items():
+        parts = _publication_parts(candidate)
+        if parts is None:
+            continue
+        letters, digits = parts
+        same_number = digits == selected_digits and _edit_distance(
+            letters,
+            selected_letters,
+        ) <= 1
+        clipped_number = (
+            letters == selected_letters
+            and 1 <= len(selected_digits) - len(digits) <= 2
+            and selected_digits.startswith(digits)
+        )
+        if same_number or clipped_number:
+            supporting_votes += candidate_votes
+    return supporting_votes >= 2
+
+
+def _gcn_code_conflicts_with_only_reference(
     publication_number: str,
     reference_codes: list[str],
-) -> str:
-    raw = re.sub(r"[^A-Z0-9]", "", publication_number.upper())
-    scored = []
-    for reference in reference_codes:
-        compact_reference = re.sub(r"[^A-Z0-9]", "", reference.upper())
-        distance = _edit_distance(raw, compact_reference)
-        if distance <= 2:
-            scored.append((distance, reference))
-    if not scored:
-        return publication_number
-    scored.sort(key=lambda item: item[0])
-    if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return publication_number
-    return scored[0][1]
+) -> bool:
+    if len(reference_codes) != 1:
+        return False
+    publication_parts = _publication_parts(publication_number)
+    reference_parts = _publication_parts(reference_codes[0])
+    if publication_parts is None or reference_parts is None:
+        return False
+    return (
+        publication_parts[0] != reference_parts[0]
+        and publication_parts[1] != reference_parts[1]
+    )
+
+
+def _gcn_candidates_from_regions(
+    image: Image.Image,
+    regions: tuple[tuple[tuple[float, float, float, float], bool], ...],
+) -> list[str]:
+    candidates: list[str] = []
+    for region, use_dark_threshold in regions:
+        crop = _relative_crop(image, region).convert("RGB")
+        for channel in ("R", "G", "B"):
+            base = ImageOps.autocontrast(crop.getchannel(channel), cutoff=0.5)
+            variants = [base]
+            if use_dark_threshold:
+                variants.append(base.point(lambda value: 255 if value > 100 else 0))
+            for prepared in variants:
+                border = max(8, round(min(prepared.size) * 0.25))
+                prepared = ImageOps.expand(prepared, border=border, fill="white")
+                if prepared.width < 1200:
+                    scale = min(6.0, 1200 / max(1, prepared.width))
+                    prepared = prepared.resize(
+                        (round(prepared.width * scale), round(prepared.height * scale)),
+                        Image.Resampling.LANCZOS,
+                    )
+                text = _ocr(
+                    prepared,
+                    "eng",
+                    7,
+                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                )
+                candidate = _gcn_candidate(text)
+                if candidate:
+                    candidates.append(candidate)
+    return candidates
 
 
 def _detect_gcn(
     image: Image.Image,
     reference_codes: list[str] | None = None,
-    fallback_code: str | None = None,
+    preferred_reference: str | None = None,
 ) -> AutoNameResult | None:
     reference_codes = reference_codes or []
-    if fallback_code:
-        title_crop = _prepare_color(
-            _relative_crop(image, (0.22, 0.04, 0.98, 0.68))
+
+    primary_regions = (
+        ((0.845, 0.795, 0.940, 0.850), False),
+        ((0.865, 0.82, 0.970, 0.88), False),
+        ((0.82, 0.80, 0.96, 0.89), False),
+        # Some CamScanner pages cut the final digit against the right edge.
+        ((0.86, 0.785, 0.985, 0.875), True),
+    )
+    candidates = _gcn_candidates_from_regions(image, primary_regions)
+    publication_number = _select_publication_number(
+        candidates,
+        reference_codes,
+        preferred_reference,
+    )
+    title_confirmed = _is_gcn_cover(image)
+
+    if (
+        publication_number is not None
+        and not _gcn_code_conflicts_with_only_reference(
+            publication_number,
+            reference_codes,
         )
-        title_text = _search_text(_ocr(title_crop, "vie", 11))
-        if "GIAY CHUNG NHAN" in title_text or "QUYEN SU DUNG DAT" in title_text:
-            return AutoNameResult(
-                sanitize_filename(fallback_code),
-                "GCN",
-                f"Đã nhận dạng GCN và đối chiếu số phát hành {fallback_code}",
+        and (
+            title_confirmed
+            or _gcn_code_is_strong_without_title(
+                publication_number,
+                candidates,
+                reference_codes,
             )
-    # The publication number is printed in a small box near the lower-right
-    # corner of the GCN cover. Several tight windows cover common scan margins.
-    regions = (
-        (0.865, 0.82, 0.970, 0.88),
-        (0.82, 0.80, 0.96, 0.89),
-        (0.72, 0.80, 0.91, 0.90),
-        (0.84, 0.72, 0.98, 0.82),
-        (0.68, 0.70, 0.88, 0.82),
-        (0.35, 0.70, 0.75, 0.96),
-        (0.20, 0.68, 0.98, 0.97),
+        )
+    ):
+        return AutoNameResult(
+            sanitize_filename(publication_number),
+            "GCN",
+            f"Đã nhận dạng GCN: số phát hành {publication_number}",
+        )
+
+    # A wrong orientation or a non-GCN page usually has neither a title nor a
+    # serial candidate.  Stop here so the caller can try the next rotation
+    # without spending many OCR passes on unrelated lower-page regions.
+    if not title_confirmed and not candidates:
+        return None
+
+    fallback_regions = (
+        ((0.72, 0.80, 0.91, 0.90), False),
+        ((0.84, 0.72, 0.98, 0.82), False),
+        ((0.68, 0.70, 0.88, 0.82), False),
+        ((0.35, 0.70, 0.75, 0.96), False),
+        ((0.20, 0.68, 0.98, 0.97), False),
+        # Red-cover and portrait scans print the serial lower and farther left.
+        ((0.62, 0.82, 0.92, 0.92), True),
+        ((0.60, 0.80, 0.94, 0.94), True),
+    )
+    candidates.extend(_gcn_candidates_from_regions(image, fallback_regions))
+    publication_number = _select_publication_number(
+        candidates,
+        reference_codes,
+        preferred_reference,
     )
 
-    for region in regions:
-        crop = _relative_crop(image, region).convert("RGB")
-        for channel in ("G", "B"):
-            prepared = ImageOps.autocontrast(crop.getchannel(channel), cutoff=0.5)
-            border = max(8, round(min(prepared.size) * 0.25))
-            prepared = ImageOps.expand(prepared, border=border, fill="white")
-            if prepared.width < 1200:
-                scale = min(6.0, 1200 / max(1, prepared.width))
-                prepared = prepared.resize(
-                    (round(prepared.width * scale), round(prepared.height * scale)),
-                    Image.Resampling.LANCZOS,
-                )
-            text = _ocr(
-                prepared,
-                "eng",
-                7,
-                "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    if (
+        publication_number is not None
+        and not _gcn_code_conflicts_with_only_reference(
+            publication_number,
+            reference_codes,
+        )
+        and (
+            title_confirmed
+            or _gcn_code_is_strong_without_title(
+                publication_number,
+                candidates,
+                reference_codes,
             )
-            publication_number = _gcn_candidate(text)
-            if publication_number:
-                publication_number = _correct_publication_number(
-                    publication_number,
-                    reference_codes,
-                )
-                return AutoNameResult(
-                    sanitize_filename(publication_number),
-                    "GCN",
-                    f"Đã nhận dạng GCN: số phát hành {publication_number}",
-                )
+        )
+    ):
+        return AutoNameResult(
+            sanitize_filename(publication_number),
+            "GCN",
+            f"Đã nhận dạng GCN: số phát hành {publication_number}",
+        )
+
+    # Last resort for a confirmed cover whose serial is physically clipped or
+    # too blurred to read: use the range-matched source hint only when OCR found
+    # no candidate at all.  For a one-code source, the sole hint may also recover
+    # a severely degraded serial.  Multi-code folders with conflicting OCR are
+    # deliberately left for manual review instead of forcing their page order.
+    source_fallback = None
+    if title_confirmed and preferred_reference and not candidates:
+        source_fallback = preferred_reference
+    elif title_confirmed and preferred_reference:
+        preferred_parts = _publication_parts(preferred_reference)
+        parsed_short = [
+            parts
+            for candidate in candidates
+            if (parts := _publication_parts(candidate)) is not None
+        ]
+        if (
+            preferred_parts is not None
+            and parsed_short
+            and all(len(digits) <= 4 for _, digits in parsed_short)
+            and sum(
+                letters == preferred_parts[0]
+                for letters, _ in parsed_short
+            )
+            > len(parsed_short) / 2
+        ):
+            source_fallback = preferred_reference
+    if source_fallback is None and title_confirmed and len(reference_codes) == 1:
+        source_fallback = reference_codes[0]
+    if source_fallback:
+        return AutoNameResult(
+            sanitize_filename(source_fallback),
+            "GCN",
+            f"Đã nhận dạng bìa GCN và đối chiếu số phát hành {source_fallback}",
+        )
     return None
 
 
@@ -609,19 +872,12 @@ def suggest_document_filename(
         return None
 
     publication_codes, source_names = _source_hints(source_path)
-    if len(publication_codes) == 1 and range_start == 1:
-        publication_number = publication_codes[0]
-        return AutoNameResult(
-            sanitize_filename(publication_number),
-            "GCN",
-            f"Đã đối chiếu số phát hành GCN từ hồ sơ: {publication_number}",
-        )
-    fallback_code = None
+    preferred_reference = None
     if publication_codes and range_start:
         pair_index = max(0, (range_start - 1) // 2)
         reference_index = len(publication_codes) - 1 - pair_index
         if 0 <= reference_index < len(publication_codes):
-            fallback_code = publication_codes[reference_index]
+            preferred_reference = publication_codes[reference_index]
 
     for source in images[:2]:
         source = source.convert("RGB")
@@ -645,7 +901,7 @@ def suggest_document_filename(
             source.rotate(90, expand=True),
             source.rotate(180, expand=True),
         ):
-            gcn = _detect_gcn(image, publication_codes, fallback_code)
+            gcn = _detect_gcn(image, publication_codes, preferred_reference)
             if gcn:
                 return gcn
     return None
