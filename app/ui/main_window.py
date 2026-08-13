@@ -745,6 +745,12 @@ class MainWindow(QMainWindow):
 
         self.txtPdf.setText(file)
 
+        # Default the output location to the folder that contains the
+        # selected source PDF.  Users can still choose another folder with
+        # the "Chọn" button afterwards.
+        self.save_folder = os.path.dirname(file)
+        self.txtSave.setText(self.save_folder)
+
         try:
 
             self.doc=fitz.open(file)
