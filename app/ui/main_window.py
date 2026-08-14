@@ -1,5 +1,6 @@
 import copy
 import os
+import tempfile
 import fitz
 
 from PySide6.QtWidgets import *
@@ -19,6 +20,7 @@ from app.services.auto_correct import (
     ensure_ocr_available,
 )
 from app.services.auto_naming import suggest_document_filename
+from app.services.blank_pages import find_blank_page_indices
 from app.services.preview import render_page_image, render_page_preview
 from app.services.splitter import (
     merge_pdf_with_edits,
@@ -145,6 +147,8 @@ class MainWindow(QMainWindow):
         self.page_order = []
         self.edited_pages = {}
         self.checked_pages = set()
+        self.blank_page_indices = set()
+        self.removed_blank_page_indices = set()
         self._thumbnail_cache = {}
         # This is the interface language.  OCR language remains independent
         # when the user chooses the automatic OCR option.
@@ -764,6 +768,9 @@ class MainWindow(QMainWindow):
             return
 
         self.edited_pages = {}
+        self.blank_page_indices = self.detect_blank_pages()
+        self.removed_blank_page_indices = set()
+        self.checked_pages = set(self.blank_page_indices)
         self._thumbnail_cache.clear()
 
         self.current_page = 0
@@ -790,6 +797,9 @@ class MainWindow(QMainWindow):
 
         self.update_preview()
 
+        if self.blank_page_indices:
+            self.ask_to_remove_blank_pages()
+
 
     def choose_folder(self):
 
@@ -800,6 +810,226 @@ class MainWindow(QMainWindow):
             self.save_folder=folder
 
             self.txtSave.setText(folder)
+
+
+    def detect_blank_pages(self):
+        """Detect likely blank pages while keeping the window responsive."""
+        if self.doc is None:
+            return set()
+
+        english = self.ui_language == "en"
+        progress = QProgressDialog(
+            "Finding blank pages..." if english else "Đang tìm trang trắng...",
+            "Cancel" if english else "Hủy",
+            0,
+            self.doc.page_count,
+            self,
+        )
+        progress.setWindowTitle(
+            "Blank-page detection" if english else "Nhận diện trang trắng"
+        )
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(250)
+        progress.setAutoClose(False)
+
+        def update_progress(page_index, total_pages):
+            progress.setValue(page_index)
+            page_number = min(page_index + 1, total_pages)
+            progress.setLabelText(
+                f"Checking page {page_number}/{total_pages}..."
+                if english
+                else f"Đang kiểm tra trang {page_number}/{total_pages}..."
+            )
+            QApplication.processEvents()
+
+        try:
+            blank_pages = find_blank_page_indices(
+                self.doc,
+                should_cancel=progress.wasCanceled,
+                on_progress=update_progress,
+            )
+        finally:
+            progress.close()
+
+        return set(blank_pages or [])
+
+
+    def ask_to_remove_blank_pages(self):
+        """Let the user decide whether detected blank pages leave the output."""
+        english = self.ui_language == "en"
+        positions = [
+            str(position + 1)
+            for position, page_index in enumerate(self.page_order)
+            if page_index in self.blank_page_indices
+        ]
+        page_list = ", ".join(positions[:30])
+        if len(positions) > 30:
+            page_list += ", ..."
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle(
+            "Blank pages detected" if english else "Trang trắng đã phát hiện"
+        )
+        dialog.setText(
+            (
+                f"Detected {len(positions)} likely blank pages (pages {page_list}) "
+                "and selected them automatically."
+            )
+            if english
+            else (
+                f"Đã phát hiện {len(positions)} trang có vẻ trắng (trang {page_list}) "
+                "và tự động tích chọn chúng."
+            )
+        )
+        dialog.setInformativeText(
+            (
+                "Permanently remove these pages from the source PDF? "
+                "This cannot be undone."
+            )
+            if english
+            else (
+                "Bạn có muốn xóa vĩnh viễn các trang này khỏi PDF nguồn không? "
+                "Thao tác này không thể hoàn tác."
+            )
+        )
+        remove_button = dialog.addButton(
+            "Remove from source PDF" if english else "Xóa khỏi PDF gốc",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        keep_button = dialog.addButton(
+            "Keep pages" if english else "Giữ lại",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        dialog.setDefaultButton(keep_button)
+        dialog.exec()
+
+        if dialog.clickedButton() == remove_button:
+            self.remove_detected_blank_pages()
+
+
+    def remove_detected_blank_pages(self):
+        """Permanently remove detected blank pages from the source PDF."""
+        english = self.ui_language == "en"
+        removable_pages = [
+            page_index
+            for page_index in self.page_order
+            if page_index in self.blank_page_indices
+        ]
+        if not removable_pages:
+            return
+
+        remaining_pages = [
+            page_index
+            for page_index in self.page_order
+            if page_index not in self.blank_page_indices
+        ]
+        if not remaining_pages:
+            QMessageBox.warning(
+                self,
+                "Cannot remove pages" if english else "Không thể xóa trang",
+                (
+                    "Every page was detected as likely blank. "
+                    "At least one page must remain in the source PDF."
+                )
+                if english
+                else (
+                    "PDF chỉ có các trang được nhận diện là trắng. "
+                    "Cần giữ lại ít nhất một trang trong PDF gốc."
+                ),
+            )
+            return
+
+        source_path = self.pdf_path
+        source_folder = os.path.dirname(source_path)
+        source_name = os.path.splitext(os.path.basename(source_path))[0]
+        temporary_path = None
+        output_doc = None
+        source_replaced = False
+
+        try:
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix=f".{source_name}_without_blank_",
+                suffix=".pdf",
+                dir=source_folder,
+            )
+            os.close(descriptor)
+
+            output_doc = fitz.open()
+            for page_index in remaining_pages:
+                output_doc.insert_pdf(
+                    self.doc,
+                    from_page=page_index,
+                    to_page=page_index,
+                )
+            output_doc.save(temporary_path, garbage=4, deflate=True)
+            output_doc.close()
+            output_doc = None
+
+            # Closing the current document releases its Windows file lock so
+            # the finished temporary PDF can atomically replace the source.
+            self.doc.close()
+            self.doc = None
+            os.replace(temporary_path, source_path)
+            source_replaced = True
+            temporary_path = None
+            self.doc = fitz.open(source_path)
+        except Exception as error:
+            if self.doc is None:
+                try:
+                    self.doc = fitz.open(source_path)
+                except Exception:
+                    pass
+            QMessageBox.critical(
+                self,
+                "Could not update source PDF" if english else "Không thể cập nhật PDF gốc",
+                (
+                    (
+                        "The source PDF was updated, but the app could not reopen it. "
+                        f"Please reopen the file.\n{error}"
+                    )
+                    if source_replaced and english
+                    else (
+                        f"PDF gốc đã được cập nhật, nhưng app không thể mở lại file. "
+                        f"Hãy mở lại file.\n{error}"
+                        if source_replaced
+                        else (
+                            f"The source PDF was not changed.\n{error}"
+                            if english
+                            else f"PDF gốc chưa bị thay đổi.\n{error}"
+                        )
+                    )
+                ),
+            )
+            return
+        finally:
+            if output_doc is not None:
+                output_doc.close()
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
+
+        self.edited_pages = {}
+        self.page_order = list(range(self.doc.page_count))
+        self.checked_pages.clear()
+        self.blank_page_indices.clear()
+        self.removed_blank_page_indices = set(removable_pages)
+        self._thumbnail_cache.clear()
+        self.current_page = 0
+        self.build_page_list()
+        self.update_preview()
+
+        QMessageBox.information(
+            self,
+            "Source PDF updated" if english else "Đã cập nhật PDF gốc",
+            (
+                f"Removed {len(removable_pages)} blank page(s) from the source PDF."
+                if english
+                else f"Đã xóa {len(removable_pages)} trang trắng khỏi PDF gốc."
+            ),
+        )
 
 
 
@@ -1028,9 +1258,9 @@ class MainWindow(QMainWindow):
 
                 a, b = (part.strip() for part in line.split("-"))
                 start, end = int(a), int(b)
-                if start < 1 or start > end or end > self.doc.page_count:
+                if start < 1 or start > end or end > len(self.page_order):
                     raise ValueError(
-                        f"Khoảng {line} phải nằm trong PDF 1-{self.doc.page_count}."
+                        f"Khoảng {line} phải nằm trong PDF 1-{len(self.page_order)}."
                     )
                 ranges.append((start, end))
         except ValueError as error:
@@ -1132,7 +1362,7 @@ class MainWindow(QMainWindow):
         try:
             page_numbers = parse_page_selection(
                 self.txtMergePages.text(),
-                self.doc.page_count,
+                len(self.page_order),
             )
         except ValueError as error:
             QMessageBox.warning(self, "L\u1ed7i ch\u1ecdn trang", str(error))
@@ -1205,10 +1435,14 @@ class MainWindow(QMainWindow):
 
         self.pageList.blockSignals(True)
         self.pageList.clear()
-        self.checked_pages.clear()
 
-        if sorted(self.page_order) != list(range(self.doc.page_count)):
+        if not self.page_order or any(
+            page_index < 0 or page_index >= self.doc.page_count
+            for page_index in self.page_order
+        ):
             self.page_order = list(range(self.doc.page_count))
+        self.checked_pages.intersection_update(self.page_order)
+        self.blank_page_indices.intersection_update(self.page_order)
 
         for display_index, page_index in enumerate(self.page_order):
             item = QListWidgetItem(
@@ -1267,6 +1501,13 @@ class MainWindow(QMainWindow):
                 f"Vị trí {display_index + 1} | Trang gốc {page_index + 1}\n"
                 "Kéo sang trái hoặc phải để đổi thứ tự xuất."
             )
+        if page_index in self.blank_page_indices:
+            suffix = (
+                "\nDetected as likely blank."
+                if self.ui_language == "en"
+                else "\nĐược nhận diện là trang trắng."
+            )
+            item.setToolTip(item.toolTip() + suffix)
 
 
     def page_thumbnail(self, page_index, selected=False):
@@ -1330,6 +1571,8 @@ class MainWindow(QMainWindow):
         )
         if page_index in self.edited_pages:
             label += " (edited)" if self.ui_language == "en" else " (đã sửa)"
+        if page_index in self.blank_page_indices:
+            label += " (blank)" if self.ui_language == "en" else " (trắng)"
         return label
 
 
@@ -1404,20 +1647,28 @@ class MainWindow(QMainWindow):
         current_position = self.page_position(self.current_page) + 1
         order_changed = self.page_order != list(range(self.doc.page_count))
         self.btnMovePageLeft.setEnabled(current_position > 1)
-        self.btnMovePageRight.setEnabled(current_position < self.doc.page_count)
+        visible_page_count = len(self.page_order)
+        self.btnMovePageRight.setEnabled(current_position < visible_page_count)
 
         if self.ui_language == "en":
             summary = (
-                f"{self.doc.page_count} pages | "
+                f"{visible_page_count} pages | "
                 f"Current position: {current_position}"
             )
         else:
             summary = (
-                f"{self.doc.page_count} trang | "
+                f"{visible_page_count} trang | "
                 f"Vị trí đang chọn: {current_position}"
             )
 
-        if order_changed:
+        if self.removed_blank_page_indices:
+            removed_label = (
+                f"Removed blank: {len(self.removed_blank_page_indices)}"
+                if self.ui_language == "en"
+                else f"Đã xóa trang trắng: {len(self.removed_blank_page_indices)}"
+            )
+            summary += f" | {removed_label}"
+        elif order_changed:
             summary += " | Reordered" if self.ui_language == "en" else " | Đã đổi thứ tự"
 
         if selected_count:
