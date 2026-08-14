@@ -30,6 +30,7 @@ from app.services.splitter import (
     split_pdf_with_edits,
 )
 from app.ui.image_pdf_dialog import ImageToPdfDialog
+from app.ui.merge_pdf_dialog import MergePdfDialog
 from app.ui.rename_dialog import RenameDialog
 
 
@@ -199,8 +200,13 @@ class MainWindow(QMainWindow):
 
         self.btnImageToPdf.clicked.connect(self.open_image_to_pdf)
 
+        self.btnMergeFiles = QPushButton("GHÉP NHIỀU PDF")
+        self.btnMergeFiles.setMinimumHeight(38)
+        self.btnMergeFiles.clicked.connect(self.open_multi_file_merge)
+
         image_tools.addStretch()
 
+        image_tools.addWidget(self.btnMergeFiles)
         image_tools.addWidget(self.btnImageToPdf)
 
         layout.addLayout(image_tools)
@@ -663,6 +669,9 @@ class MainWindow(QMainWindow):
             else "Chọn ngôn ngữ OCR cho TỰ SỬA: Tự động dùng cả tiếng Việt và English."
         )
         self.autoOcrLabel.setText("OCR language" if english else "OCR")
+        self.btnMergeFiles.setText(
+            "MERGE PDF FILES" if english else "GHÉP NHIỀU PDF"
+        )
         self.btnImageToPdf.setText("IMAGE → PDF" if english else "ẢNH → PDF")
 
         self.groupFile.setTitle("Source PDF" if english else "PDF nguồn")
@@ -727,6 +736,11 @@ class MainWindow(QMainWindow):
         dialog = ImageToPdfDialog(self)
 
         dialog.exec()
+
+
+    def open_multi_file_merge(self):
+        """Open the independent page-by-page multi-file merge workflow."""
+        MergePdfDialog(self, self.ui_language).exec()
 
 
     def open_pdf(self):

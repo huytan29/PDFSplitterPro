@@ -77,6 +77,39 @@ def merge_selected_pages(pdf_file, output_file, page_numbers, page_order=None):
         writer.write(file)
 
 
+def merge_pdf_page_sequence(page_sequence, output_file):
+    """Write a PDF from pages selected across one or more PDF files.
+
+    ``page_sequence`` stores pairs of ``(pdf_path, zero_based_page_index)``.
+    Its order is preserved exactly, which lets the interface combine full
+    files, individual pages, and any custom page order in one export.
+    """
+    if not page_sequence:
+        raise ValueError("Chưa có trang nào để ghép.")
+
+    readers = {}
+    writer = PdfWriter()
+
+    for pdf_path, page_index in page_sequence:
+        reader = readers.get(pdf_path)
+        if reader is None:
+            reader = PdfReader(pdf_path)
+            if reader.is_encrypted and reader.decrypt("") == 0:
+                raise ValueError(
+                    f"PDF được bảo vệ bằng mật khẩu: {os.path.basename(pdf_path)}"
+                )
+            readers[pdf_path] = reader
+
+        if page_index < 0 or page_index >= len(reader.pages):
+            raise ValueError(
+                f"Trang không hợp lệ trong file: {os.path.basename(pdf_path)}"
+            )
+        writer.add_page(reader.pages[page_index])
+
+    with open(output_file, "wb") as file:
+        writer.write(file)
+
+
 def merge_pdf_with_edits(
         doc, output_file, page_numbers, edited_pages, page_order=None):
     """Ghep trang, dong thoi dua cac chinh sua dang nam trong bo nho vao file."""
