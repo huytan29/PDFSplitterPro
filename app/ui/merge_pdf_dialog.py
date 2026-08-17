@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 
+import fitz
 from pypdf import PdfReader
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -18,10 +20,163 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
     QVBoxLayout,
 )
 
 from app.services.splitter import merge_pdf_page_sequence, parse_page_selection
+
+
+class PdfPagePreviewDialog(QDialog):
+    """Browse a sequence of pages from one or many PDF files."""
+
+    def __init__(self, title, page_sequence, parent=None, language="vi"):
+        super().__init__(parent)
+        self.language = "en" if language == "en" else "vi"
+        self.page_sequence = list(page_sequence)
+        self.documents = {}
+        self._syncing_page = False
+
+        self.setWindowTitle(title)
+        self.resize(1120, 760)
+        self.setMinimumSize(760, 520)
+        self._build_ui()
+        self._build_thumbnails()
+
+    def t(self, vietnamese, english):
+        return english if self.language == "en" else vietnamese
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.summary_label = QLabel()
+        self.summary_label.setStyleSheet("font-size: 15px; font-weight: 700;")
+        root.addWidget(self.summary_label)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        root.addWidget(splitter, 1)
+
+        self.thumbnail_list = QListWidget()
+        self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.thumbnail_list.setFlow(QListWidget.Flow.TopToBottom)
+        self.thumbnail_list.setWrapping(False)
+        self.thumbnail_list.setIconSize(QPixmap(120, 150).size())
+        self.thumbnail_list.setGridSize(QPixmap(165, 190).size())
+        self.thumbnail_list.setMinimumWidth(180)
+        self.thumbnail_list.setMaximumWidth(240)
+        self.thumbnail_list.setSpacing(5)
+        self.thumbnail_list.currentRowChanged.connect(self.select_page)
+        splitter.addWidget(self.thumbnail_list)
+
+        preview_panel = QScrollArea()
+        preview_panel.setWidgetResizable(False)
+        preview_panel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_panel.setStyleSheet("QScrollArea { background: #202020; border: 1px solid #4a4a4a; }")
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_panel.setWidget(self.preview_label)
+        splitter.addWidget(preview_panel)
+        splitter.setSizes([220, 900])
+
+        controls = QHBoxLayout()
+        self.btn_previous = QPushButton(self.t("◀ Trang trước", "◀ Previous"))
+        self.btn_next = QPushButton(self.t("Trang sau ▶", "Next ▶"))
+        self.page_spin = QSpinBox()
+        self.page_spin.setMinimum(1)
+        self.page_spin.setMaximum(max(1, len(self.page_sequence)))
+        self.page_spin.valueChanged.connect(self.select_page_number)
+        self.page_details = QLabel()
+        self.page_details.setStyleSheet("color: #9ab6ca;")
+        self.btn_previous.clicked.connect(lambda: self.page_spin.setValue(self.page_spin.value() - 1))
+        self.btn_next.clicked.connect(lambda: self.page_spin.setValue(self.page_spin.value() + 1))
+        controls.addWidget(self.btn_previous)
+        controls.addWidget(self.page_spin)
+        controls.addWidget(self.btn_next)
+        controls.addWidget(self.page_details, 1)
+        root.addLayout(controls)
+
+    def pdf_document(self, path):
+        document = self.documents.get(path)
+        if document is None:
+            document = fitz.open(path)
+            self.documents[path] = document
+        return document
+
+    def render_page(self, path, page_index, scale):
+        page = self.pdf_document(path).load_page(page_index)
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        image = QImage(
+            pixmap.samples,
+            pixmap.width,
+            pixmap.height,
+            pixmap.stride,
+            QImage.Format.Format_RGB888,
+        ).copy()
+        return QPixmap.fromImage(image)
+
+    def _build_thumbnails(self):
+        self.thumbnail_list.blockSignals(True)
+        self.thumbnail_list.clear()
+        for position, (path, page_index) in enumerate(self.page_sequence, start=1):
+            thumbnail = self.render_page(path, page_index, 0.20)
+            item = QListWidgetItem(
+                QIcon(thumbnail),
+                self.t(
+                    f"Trang {position}\n{os.path.basename(path)} · tr. {page_index + 1}",
+                    f"Page {position}\n{os.path.basename(path)} · p. {page_index + 1}",
+                ),
+            )
+            self.thumbnail_list.addItem(item)
+        self.thumbnail_list.blockSignals(False)
+
+        page_count = len(self.page_sequence)
+        self.summary_label.setText(
+            self.t(
+                f"XEM TRƯỚC {page_count} TRANG", f"PREVIEWING {page_count} PAGES"
+            )
+        )
+        if page_count:
+            self.thumbnail_list.setCurrentRow(0)
+            self.select_page(0)
+        else:
+            self.preview_label.setText(self.t("Không có trang để xem.", "No pages to preview."))
+            self.btn_previous.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.page_spin.setEnabled(False)
+
+    def select_page_number(self, page_number):
+        if self._syncing_page:
+            return
+        self.thumbnail_list.setCurrentRow(page_number - 1)
+
+    def select_page(self, row):
+        if not 0 <= row < len(self.page_sequence):
+            return
+        self._syncing_page = True
+        self.page_spin.setValue(row + 1)
+        self._syncing_page = False
+        path, page_index = self.page_sequence[row]
+        pixmap = self.render_page(path, page_index, 1.35)
+        self.preview_label.setPixmap(pixmap)
+        self.preview_label.resize(pixmap.size())
+        self.page_details.setText(
+            self.t(
+                f"PDF nguồn: {os.path.basename(path)} | Trang gốc: {page_index + 1}",
+                f"Source PDF: {os.path.basename(path)} | Original page: {page_index + 1}",
+            )
+        )
+        self.btn_previous.setEnabled(row > 0)
+        self.btn_next.setEnabled(row < len(self.page_sequence) - 1)
+
+    def closeEvent(self, event):
+        for document in self.documents.values():
+            document.close()
+        self.documents.clear()
+        super().closeEvent(event)
 
 
 class MergePdfDialog(QDialog):
@@ -31,6 +186,7 @@ class MergePdfDialog(QDialog):
         super().__init__(parent)
         self.language = "en" if language == "en" else "vi"
         self.sources = []
+        self.last_export_path = ""
 
         self.setWindowTitle(self.t("Ghép nhiều file PDF", "Merge PDF files"))
         self.resize(1120, 650)
@@ -70,6 +226,7 @@ class MergePdfDialog(QDialog):
         self.source_list = QListWidget()
         self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.source_list.currentRowChanged.connect(self._update_source_state)
+        self.source_list.itemDoubleClicked.connect(self.open_source_preview)
         source_layout.addWidget(self.source_list, 1)
 
         source_buttons = QHBoxLayout()
@@ -89,6 +246,11 @@ class MergePdfDialog(QDialog):
         ):
             source_buttons.addWidget(button)
         source_layout.addLayout(source_buttons)
+        self.btn_preview_source = QPushButton(
+            self.t("XEM FILE NGUỒN", "VIEW SOURCE PDF")
+        )
+        self.btn_preview_source.clicked.connect(self.open_source_preview)
+        source_layout.addWidget(self.btn_preview_source)
         content.addWidget(source_group, 1)
 
         page_group = QGroupBox(self.t("2. Chọn trang từ file đang chọn", "2. Choose pages from selected file"))
@@ -138,6 +300,7 @@ class MergePdfDialog(QDialog):
         self.output_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.output_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.output_list.model().rowsMoved.connect(self.refresh_output_labels)
+        self.output_list.itemDoubleClicked.connect(self.open_output_preview)
         output_layout.addWidget(self.output_list, 1)
 
         output_buttons = QHBoxLayout()
@@ -157,6 +320,18 @@ class MergePdfDialog(QDialog):
         ):
             output_buttons.addWidget(button)
         output_layout.addLayout(output_buttons)
+        preview_buttons = QHBoxLayout()
+        self.btn_preview_output = QPushButton(
+            self.t("XEM TRƯỚC KẾT QUẢ", "PREVIEW RESULT")
+        )
+        self.btn_preview_exported = QPushButton(
+            self.t("XEM PDF ĐÃ GHÉP", "VIEW MERGED PDF")
+        )
+        self.btn_preview_output.clicked.connect(self.open_output_preview)
+        self.btn_preview_exported.clicked.connect(self.open_exported_preview)
+        preview_buttons.addWidget(self.btn_preview_output)
+        preview_buttons.addWidget(self.btn_preview_exported)
+        output_layout.addLayout(preview_buttons)
         content.addWidget(output_group, 2)
 
         footer = QHBoxLayout()
@@ -251,6 +426,7 @@ class MergePdfDialog(QDialog):
         )
         self.btn_add_pages.setEnabled(available)
         self.btn_add_all_pages.setEnabled(available)
+        self.btn_preview_source.setEnabled(available)
         self.btn_add_all_files.setEnabled(bool(self.sources))
         if source:
             self.source_info.setText(
@@ -339,12 +515,74 @@ class MergePdfDialog(QDialog):
 
     def update_output_status(self, *_):
         count = self.output_list.count()
+        self.btn_preview_output.setEnabled(bool(count))
+        self.btn_preview_exported.setEnabled(bool(self.last_export_path))
         self.output_status.setText(
             self.t(
                 "Chưa có trang để ghép." if not count else f"Sẽ xuất {count} trang.",
                 "No pages selected for merging." if not count else f"{count} pages will be exported.",
             )
         )
+
+    def open_source_preview(self, _item=None):
+        source = self.current_source()
+        if source is None:
+            return
+        pages = [
+            (source["path"], page_index)
+            for page_index in range(source["page_count"])
+        ]
+        PdfPagePreviewDialog(
+            self.t(
+                f"Xem PDF nguồn - {os.path.basename(source['path'])}",
+                f"Source PDF - {os.path.basename(source['path'])}",
+            ),
+            pages,
+            self,
+            self.language,
+        ).exec()
+
+    def open_output_preview(self, _item=None):
+        pages = self.page_sequence()
+        if not pages:
+            QMessageBox.warning(
+                self,
+                self.t("Chưa có trang", "No pages selected"),
+                self.t(
+                    "Hãy thêm trang vào danh sách ghép trước khi xem trước.",
+                    "Add pages to the output list before previewing.",
+                ),
+            )
+            return
+        PdfPagePreviewDialog(
+            self.t("Xem trước PDF kết quả", "Merged PDF preview"),
+            pages,
+            self,
+            self.language,
+        ).exec()
+
+    def open_exported_preview(self):
+        if not self.last_export_path or not os.path.isfile(self.last_export_path):
+            return
+        try:
+            with fitz.open(self.last_export_path) as document:
+                pages = [
+                    (self.last_export_path, page_index)
+                    for page_index in range(document.page_count)
+                ]
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                self.t("Không thể mở PDF đã ghép", "Could not open merged PDF"),
+                str(error),
+            )
+            return
+        PdfPagePreviewDialog(
+            self.t("PDF đã ghép", "Merged PDF"),
+            pages,
+            self,
+            self.language,
+        ).exec()
 
     def move_output(self, direction):
         row = self.output_list.currentRow()
@@ -418,6 +656,8 @@ class MergePdfDialog(QDialog):
             )
             return
 
+        self.last_export_path = output
+        self.update_output_status()
         QMessageBox.information(
             self,
             self.t("Hoàn thành", "Completed"),
@@ -426,4 +666,3 @@ class MergePdfDialog(QDialog):
                 f"Successfully merged {len(sequence)} pages.\n{output}",
             ),
         )
-        self.accept()
