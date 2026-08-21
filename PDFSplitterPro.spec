@@ -3,7 +3,7 @@ import os
 
 datas = []
 binaries = []
-hiddenimports = ['pytesseract']
+hiddenimports = ['pytesseract', 'openpyxl']
 datas += [('resources/pdf_lightning_logo.png', 'resources')]
 
 ocr_folder = os.path.join('resources', 'tesseract')
@@ -32,7 +32,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PDFSplitterPro',
+    name='HoSoPDFToolkit',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

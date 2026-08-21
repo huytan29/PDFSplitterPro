@@ -30,6 +30,7 @@ from app.services.splitter import (
     split_pdf_with_edits,
 )
 from app.ui.image_pdf_dialog import ImageToPdfDialog
+from app.ui.hoso_search_window import HoSoSearchWindow
 from app.ui.merge_pdf_dialog import MergePdfDialog
 from app.ui.rename_dialog import RenameDialog
 
@@ -154,6 +155,7 @@ class MainWindow(QMainWindow):
         # This is the interface language.  OCR language remains independent
         # when the user chooses the automatic OCR option.
         self.ui_language = "vi"
+        self.hoso_search_window = None
 
         self.initUI()
 
@@ -204,8 +206,13 @@ class MainWindow(QMainWindow):
         self.btnMergeFiles.setMinimumHeight(38)
         self.btnMergeFiles.clicked.connect(self.open_multi_file_merge)
 
+        self.btnHoSoSearch = QPushButton("TÌM HỒ SƠ")
+        self.btnHoSoSearch.setMinimumHeight(38)
+        self.btnHoSoSearch.clicked.connect(self.open_hoso_search)
+
         image_tools.addStretch()
 
+        image_tools.addWidget(self.btnHoSoSearch)
         image_tools.addWidget(self.btnMergeFiles)
         image_tools.addWidget(self.btnImageToPdf)
 
@@ -729,6 +736,20 @@ class MainWindow(QMainWindow):
         for page_index in range(self.pageList.count()):
             self.refresh_page_list_item(page_index)
         self.update_page_selection_status()
+
+
+    def open_hoso_search(self):
+        """Open the integrated dossier-search workspace in the same application."""
+        if self.hoso_search_window is None:
+            self.hoso_search_window = HoSoSearchWindow(self)
+            self.hoso_search_window.destroyed.connect(self._clear_hoso_search_window)
+        self.hoso_search_window.show()
+        self.hoso_search_window.raise_()
+        self.hoso_search_window.activateWindow()
+
+
+    def _clear_hoso_search_window(self, *_args):
+        self.hoso_search_window = None
 
 
     def open_image_to_pdf(self):

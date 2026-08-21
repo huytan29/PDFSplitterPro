@@ -16,7 +16,7 @@ def resource_path(relative_path):
 def main():
     app = QApplication(sys.argv)
 
-    app.setApplicationName("PDF Splitter Pro")
+    app.setApplicationName("HoSo PDF Toolkit")
 
     app.setWindowIcon(QIcon(resource_path("resources/pdf_lightning_logo.png")))
 
